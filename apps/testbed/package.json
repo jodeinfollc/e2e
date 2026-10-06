@@ -21,9 +21,9 @@
     "e2e": "workspace:*"
   },
   "devDependencies": {
-    "@ai-sdk/devtools": "1.0.22",
-    "@types/node": "26.6.2",
-    "ai": "7.0.107",
+    "@ai-sdk/devtools": "1.0.30",
+    "@types/node": "26.6.4",
+    "ai": "7.0.127",
     "typescript": "7.0.2",
     "zod": "4.6.1"
   }
