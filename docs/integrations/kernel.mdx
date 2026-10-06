@@ -1,0 +1,164 @@
+---
+title: Kernel browsers
+sidebarTitle: Kernel
+description: Run web targets in Kernel's hosted Chromium with the kernel() browser provider from @e2e-dev/kernel.
+icon: "/images/icons/kernel.svg"
+---
+
+`kernel()` from `@e2e-dev/kernel` is a
+[browser provider](/browser#hosted-browsers) for [Kernel](https://kernel.sh).
+By default each worker slot gets its own hosted Chromium, created when the run
+starts and deleted when it ends; `scope: 'attempt'` leases one per test
+attempt instead. Tests and CI stay the same; the config changes only in the
+target's `browser`.
+
+## Setup
+
+<CodeGroup>
+```bash npm
+npm install --save-dev @e2e-dev/kernel @onkernel/sdk
+```
+
+```bash pnpm
+pnpm add -D @e2e-dev/kernel @onkernel/sdk
+```
+
+```bash bun
+bun add -d @e2e-dev/kernel @onkernel/sdk
+```
+</CodeGroup>
+
+```ts title="e2e.config.ts"
+import type { E2EConfig } from 'e2e';
+import { web } from '@e2e-dev/web';
+import { kernel } from '@e2e-dev/kernel';
+
+export default {
+  targets: [
+    {
+      name: 'kernel',
+      engine: web({ browser: kernel() }),
+      app: { url: 'https://staging.example.com' },
+    },
+  ],
+} satisfies E2EConfig;
+```
+
+Set `KERNEL_API_KEY` in the environment `e2e run` starts in, such as a CI
+secret. Each worker gets its own browser, so `workers` sets how many run at
+once.
+
+## Fill the screen
+
+Size the screen with Kernel's `viewport` and set the web engine's
+`viewport: null` so the page takes the window's size:
+
+```ts
+web({
+  browser: kernel({ viewport: { width: 1920, height: 1080 } }),
+  viewport: null,
+})
+```
+
+Each attempt's window then opens maximized, and the page
+[fills it](/web#fill-the-window): 1920 by 993 on a 1920 by 1080 screen,
+after the tab strip and address bar. With a fixed web `viewport`, the page is
+emulated at that size inside a smaller window, so Kernel's live view shows it
+cut off or in part of the window.
+
+## Options
+
+`kernel(options)` takes Kernel's create-browser body as is: `stealth`,
+`headless`, `timeout_seconds`, `profile`, `proxy_id`, `proxy`, `viewport`,
+`extensions`, `region`, `tags`, and the rest of `BrowserCreateParams` in the
+`@onkernel/sdk` you installed. On top of that:
+
+| Option   | Default    | Meaning |
+| -------- | ---------- | ------- |
+| `scope`  | `'worker'` | `'worker'`: one browser per worker slot for the run. `'attempt'`: a fresh browser per test attempt, retries included. See [Scopes](#scopes). |
+| `replay` | `true`     | How an attempt that records video is recorded. `true`, or Kernel's start-replay body (`framerate`, `max_duration_in_seconds`, `record_audio`): a Kernel replay of the browser's screen. `false`: the web engine's screencast of the page. See [Recordings](#recordings). |
+
+## Scopes
+
+`scope: 'worker'` keeps one browser per worker slot for the whole run and
+gives every attempt a new browser context on it, as a local run does: a test
+never sees another test's cookies, storage, or permissions. Kernel's initial
+tab stays open behind the attempts' windows. A context the engine creates
+does not share the browser's default context, so a Kernel `profile`'s saved
+cookies and storage are not there.
+
+`scope: 'attempt'` leases a fresh browser per attempt and runs the attempt in
+that browser's default context, on its own first tab, so a `profile` applies
+and the live view shows one tab. It costs a browser start per test and
+carries the limits of a [per-attempt lease](/browser#hosted-browsers): no
+`headers`, `basicAuth`, `userAgent`, `locale`, or `timezoneId`, no `app.clearState()`, and no
+[sessions](/authentication), which fail the run before any test.
+
+## Recordings
+
+An attempt that records [video](/reference/config#video) gets a Kernel
+replay of the browser's screen, saved as `video/replay.mp4` under the
+attempt's artifact directory. The replay shows the whole window, tabs and
+address bar included, where the web engine's screencast shows only the page.
+
+```ts title="e2e.config.ts"
+export default {
+  targets: [
+    {
+      name: 'kernel',
+      engine: web({ browser: kernel(), viewport: null }),
+      app: { url: 'https://staging.example.com' },
+      video: 'retain-on-failure',
+    },
+  ],
+} satisfies E2EConfig;
+```
+
+A test's own `video` overrides the target's, so one flow can keep its
+recording even when it passes:
+
+```ts
+test('checkout', { video: 'on' }, async ({ agent }) => {
+  await agent.act('Buy the first product in the catalog');
+});
+```
+
+A replay has the screen's size, which Kernel's `viewport` sets, at Kernel's
+default frame rate, 10 fps. Pass Kernel's start-replay body to change it:
+`kernel({ replay: { framerate: 20, max_duration_in_seconds: 600 } })`. A
+`framerate` above 20 needs `gpu: true` on the browser.
+
+Kernel replays headed browsers only, its default. With `headless: true`, or
+`replay: false`, the provider does not record, and the web engine records
+its screencast of the page instead, as it does for a local browser.
+
+## Downloads
+
+`browser.waitForDownload` works as it does locally. Each browser saves downloads
+under `/tmp/e2e-downloads` on its own disk, and the provider reads the
+finished file back through Kernel's browser filesystem API into the
+attempt's artifacts, in both scopes.
+
+## What the provider does
+
+- Tags every browser `e2e_run`, `e2e_target`, `e2e_slot`, and, per attempt,
+  `e2e_attempt`, merged over the `tags` you pass, so a session in Kernel's
+  dashboard names the run that started it.
+- Deletes, when the run ends, every browser still active with the run's
+  `e2e_run` and `e2e_target` tags: the browser of a worker that died
+  mid-attempt, in either scope, is released with the run rather than left
+  running.
+- Defaults `timeout_seconds` to 600, the backstop for a run that dies
+  itself before it can delete its browsers: Kernel deletes an idle browser
+  after that long. Pass your own to change it.
+- Logs `browser <id>, watch at <live view URL>` to the reporter as each
+  browser is created: at the start of the run in `worker` scope, and from
+  the worker for each attempt's browser in `attempt` scope and for a
+  replacement after a browser dropped.
+- Deletes a browser that arrives after its request was cancelled, and treats
+  one Kernel no longer knows as already deleted.
+
+A missing `KERNEL_API_KEY` or a Kernel error fails the lease with that
+message. In `worker` scope that ends the run before any test, and the
+browsers other slots got are still deleted; in `attempt` scope it fails the
+attempt.

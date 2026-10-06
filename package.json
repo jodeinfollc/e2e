@@ -1,0 +1,50 @@
+{
+  "name": "e2e",
+  "private": true,
+  "description": "An open framework for agentic end-to-end testing",
+  "keywords": [
+    "e2e",
+    "testing",
+    "agentic"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "pnpm --filter e2e run build && pnpm --filter @e2e-dev/web run build && pnpm --filter @e2e-dev/mobile run build && pnpm --filter @e2e-dev/github run build && pnpm --filter @e2e-dev/kernel run build && pnpm --filter @e2e-dev/eas run build && pnpm --filter @e2e-dev/decision run build",
+    "check": "pnpm run lint && pnpm run check:dead-code && pnpm run typecheck && pnpm run docs:check-errors && pnpm run check:peer-ranges && pnpm run check:install-scripts && pnpm run docs:check",
+    "check:dead-code": "fallow dead-code",
+    "check:peer-ranges": "node scripts/check-peer-ranges.ts",
+    "check:install-scripts": "node scripts/check-install-scripts.ts",
+    "docs:check-errors": "node scripts/check-error-codes.ts",
+    "docs:check": "pnpm --filter @e2e-dev/docs run check",
+    "docs:dev": "pnpm --filter @e2e-dev/docs run dev",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "changeset": "changeset",
+    "version-packages": "changeset version && node scripts/restore-peer-ranges.ts && pnpm install --lockfile-only",
+    "release": "pnpm run build && changeset publish",
+    "canary": "node scripts/canary-changeset.ts && changeset version --snapshot canary && pnpm run build",
+    "canary:publish": "changeset publish --tag canary --no-git-tag && node scripts/restore-peer-ranges.ts",
+    "typecheck": "pnpm run build && pnpm -r run typecheck && tsc -p scripts",
+    "test": "pnpm run build && pnpm --filter e2e run test && pnpm --filter @e2e-dev/web run test && pnpm --filter @e2e-dev/mobile run test && pnpm --filter @e2e-dev/github run test && pnpm --filter @e2e-dev/kernel run test && pnpm --filter @e2e-dev/eas run test && pnpm --filter @e2e-dev/decision run test && pnpm run test:scripts",
+    "test:testbed": "pnpm run build && pnpm --filter @e2e-dev/testbed test",
+    "test:web-benchmark": "pnpm run build && pnpm --filter @e2e-dev/web-benchmark test",
+    "test:mobile-benchmark": "pnpm run build && pnpm --filter @e2e-dev/mobile-benchmark test",
+    "test:agent": "pnpm run build && pnpm --filter @e2e-dev/testbed test:agent",
+    "test:scripts": "node --test \"scripts/**/*.test.ts\"",
+    "bench:ab": "node scripts/bench-ab.ts"
+  },
+  "contributors": [
+    "Oskar Kwaśniewski <oskar@tester.army>",
+    "Szymon Rybczak <szymon@tester.army>"
+  ],
+  "devDependencies": {
+    "@changesets/changelog-github": "1.0.1",
+    "@changesets/cli": "3.0.3",
+    "@types/node": "26.6.2",
+    "fallow": "3.27.0",
+    "oxlint": "1.83.0",
+    "typescript": "7.0.2",
+    "zod": "4.6.1"
+  },
+  "packageManager": "pnpm@12.3.4"
+}

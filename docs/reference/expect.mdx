@@ -1,0 +1,569 @@
+---
+title: expect
+description: "Locator assertions, fixture assertions, and plain value matchers."
+icon: "circle-check"
+---
+
+Use `expect(locator)` to wait for an app condition and `expect(value)` to
+check a value immediately. `expect.poll` repeatedly reads a value until its
+matcher passes. `expect.soft` keeps a failure for the end of the test body
+instead of throwing it, and `expect.any` and the other
+[asymmetric matchers](#asymmetric-matchers) stand in for values inside a
+structural comparison.
+
+```ts
+/** The `expect(actual)` call: a locator, an engine fixture, or a value, told apart by the argument. */
+export interface ExpectCall {
+  (actual: Locator): AsyncExpectation;
+  <E extends object>(actual: Expectable<E>): E;
+  <T>(actual: T, message?: string): ValueExpectation<T>;
+}
+
+/** The `expect.soft(actual)` call: `expect(actual)` whose failures are kept instead of thrown. */
+export interface SoftExpectCall {
+  (actual: Locator): AsyncExpectation;
+  <E extends object>(actual: Expectable<E>): E;
+  <T>(actual: T, message?: string): SoftValueExpectation<T>;
+}
+
+/** The `expect` entry: the call, `expect.poll`, `expect.soft`, and the asymmetric matchers. */
+export interface Expect extends ExpectCall {
+  /** Re-reads a value until the chosen matcher holds or `timeout` passes. */
+  poll<T>(read: () => T | Promise<T>, options?: PollOptions): PollExpectation<T>;
+  /** The same matchers, a failure kept on the attempt instead of thrown; the attempt fails once the body has settled. */
+  readonly soft: SoftExpectCall;
+  any(sample: Class | typeof BigInt | typeof Symbol): AsymmetricMatcher;
+  anything(): AsymmetricMatcher;
+  objectContaining(sample: object): AsymmetricMatcher;
+  arrayContaining(sample: readonly unknown[]): AsymmetricMatcher;
+  stringContaining(sample: string): AsymmetricMatcher;
+  stringMatching(sample: string | RegExp): AsymmetricMatcher;
+}
+```
+
+Engine fixtures can provide matchers too, such as `expect(browser).toHaveURL()`.
+Such a fixture is an `Expectable<E>`: its engine attached the matcher set `E`
+through [`expectable`](/reference/engine#contributed-fixtures), and
+`expect(fixture)` returns it.
+Other arguments use value matchers, including promises, so await a promise
+before passing its result to `expect`.
+
+| Property | Value |
+| --- | --- |
+| Default timeout | `config.assertionTimeout`, 5000 ms |
+| Override | `{ timeout }` in milliseconds, on every locator and `browser` matcher |
+| Unknown option | `INVALID_ARGUMENT` before the first read, from JavaScript too |
+| Negation grace window | A negated matcher passes after 1000 ms of continuous truth, or at the deadline when `{ timeout }` is shorter than that and the negation held for the whole budget. The window counts from the moment the first read that saw the negation started, so a slow read counts toward it |
+| Failure code | `ASSERTION_FAILED`, exit code 1 |
+
+Locator strictness: except for `toHaveCount` and the list form of
+`toHaveText` and `toContainText`, a positive matcher requires exactly one
+match; zero matches keep polling until the timeout, and multiple matches fail
+immediately with `LOCATOR_AMBIGUOUS`. `toBeHidden`, `toBeVisible({ visible:
+false })`, `toBeAttached({ attached: false })`, negated visibility, and
+negated `toBeAttached` accept zero matches; for them, and for
+`waitFor({ state: 'detached' })` and `'hidden'`, a locator under a frame that
+is not in the document is zero matches rather than a wait for the frame.
+
+Text comparison is normalized: leading and trailing whitespace is trimmed and
+each run of whitespace collapses to one space. `toHaveText` and
+`toContainText` read the same rendered text as
+[`textContent()`](/reference/screen#locator-reads), `innerText` on the web.
+A `TextMatch` string matches exactly; a `RegExp` uses its own source and
+flags; anything else, such as a predicate function, is `INVALID_ARGUMENT`.
+`toHaveValue` is the exception: a form control's value is compared as it is,
+newlines and trailing spaces included, and the failure message prints it that
+way; a `contenteditable` editor's value is its rendered text, kept the same
+way, and an empty editor reads as `''`. A control the
+platform reports without a value, such as a cleared field on a device, reads
+as `''`. A node whose role carries no value, such as a heading or a link,
+never satisfies `toHaveValue`, negated or not; the message reads
+`no value (not a form control)`. A secure field, such as a password input,
+is never judged: the engine withholds its value and text, so `toHaveValue`,
+`toHaveText`, and `toContainText` throw `POLICY_DENIED` there like
+`inputValue()` and `textContent()`, negated or in list form too, instead of
+reading the withheld value as `''` and passing a filled password field as
+cleared. `toHaveAccessibleName` and the state matchers still answer there.
+Assert the outcome of the fill, not the field.
+
+## Locator matchers
+
+```ts
+/**
+ * The locator matchers. An option a matcher does not take, or a flag that is
+ * not a boolean, is `INVALID_ARGUMENT` before the first read.
+ */
+export interface AsyncExpectation {
+  /** Inverts the matcher. A negated matcher passes after 1000 ms of continuous truth. */
+  readonly not: AsyncExpectation;
+  /** Waits for visibility; `visible: false` waits for hidden or absent state, as `toBeHidden`. */
+  toBeVisible(options?: { visible?: boolean; timeout?: number }): Promise<void>;
+  /** Waits for hidden or absent state. */
+  toBeHidden(options?: { timeout?: number }): Promise<void>;
+  /** Waits for one match to exist, visible or not; `attached: false` waits for none. */
+  toBeAttached(options?: { attached?: boolean; timeout?: number }): Promise<void>;
+  /** Waits for enabled state; `enabled: false` waits for disabled state. */
+  toBeEnabled(options?: { enabled?: boolean; timeout?: number }): Promise<void>;
+  /** Waits for disabled state. */
+  toBeDisabled(options?: { timeout?: number }): Promise<void>;
+  /** Waits for checked state; `checked: false` waits for unchecked state. */
+  toBeChecked(options?: { checked?: boolean; timeout?: number }): Promise<void>;
+  /** Waits for selected state. */
+  toBeSelected(options?: { timeout?: number }): Promise<void>;
+  /** Waits for expanded state. */
+  toBeExpanded(options?: { timeout?: number }): Promise<void>;
+  /** Waits for focused state. */
+  toBeFocused(options?: { timeout?: number }): Promise<void>;
+  /** Waits for exact normalized text; a list waits for exactly that many matches, each with its entry's text, in order. */
+  toHaveText(expected: TextMatch, options?: TextMatcherOptions): Promise<void>;
+  toHaveText(expected: readonly TextMatch[], options?: TextMatcherOptions): Promise<void>;
+  /** Waits for contained normalized text; a list waits for each entry to be contained by a distinct match, in order, extra matches allowed. */
+  toContainText(expected: TextMatch, options?: TextMatcherOptions): Promise<void>;
+  toContainText(expected: readonly TextMatch[], options?: TextMatcherOptions): Promise<void>;
+  /** Waits for a form control's value, compared as it is. */
+  toHaveValue(expected: TextMatch, options?: { timeout?: number }): Promise<void>;
+  /** Waits for the attribute to be present; with `value`, for it to match. */
+  toHaveAttribute(name: string, options?: { timeout?: number }): Promise<void>;
+  toHaveAttribute(name: string, value: TextMatch, options?: TextMatcherOptions): Promise<void>;
+  /** Waits for an exact match count. */
+  toHaveCount(expected: number, options?: { timeout?: number }): Promise<void>;
+  /** Waits for an accessible name. */
+  toHaveAccessibleName(expected: TextMatch, options?: TextMatcherOptions): Promise<void>;
+}
+
+/** Options of a locator matcher that compares text. */
+export interface TextMatcherOptions {
+  /** Compares a string case-insensitively; on a RegExp, `true` adds the `i` flag and `false` removes it. */
+  ignoreCase?: boolean;
+  /** Assertion budget in milliseconds. */
+  timeout?: number;
+}
+```
+
+A missing `checked`, `selected`, or `expanded` state counts as `false`, so
+`.not.toBeChecked()` passes on a button or a heading; a node is enabled
+unless it reports `disabled`. On the web, `disabled` is the state the
+browser applies, not the attribute alone: a control inside a
+`<fieldset disabled>` is disabled unless it sits in that fieldset's first
+`<legend>`, and `aria-disabled="true"` on an ancestor disables the widgets
+below it until an `aria-disabled="false"` cuts the chain, the same reading
+Playwright's `toBeDisabled` gives. `toHaveAttribute(name, value)`
+compares like `toHaveText`, after normalization. On a secure field, such as a
+password input, `toHaveAttribute` throws `POLICY_DENIED` like
+`getAttribute()`, for every attribute name and negated too: the field's
+`value` attribute is withheld, so reading it as absent would pass
+`not.toHaveAttribute('value')` on a password field that has one.
+
+`toBeAttached` passes once one match exists, hidden or shown, where
+`toBeVisible` needs a shown one. Negated, it passes once nothing matches.
+
+The boolean options Playwright gives these matchers work the same way:
+`toBeChecked({ checked: false })` waits for an unchecked node,
+`toBeEnabled({ enabled: false })` for a disabled one,
+`toBeVisible({ visible: false })` for a hidden or absent one, as
+`toBeHidden` does, and `toBeAttached({ attached: false })` for no match.
+`ignoreCase: true` on `toHaveText`, `toContainText`, `toHaveAccessibleName`,
+and the value form of `toHaveAttribute` compares a string case-insensitively
+and adds the `i` flag to a `RegExp`; `ignoreCase: false` removes it.
+
+A matcher refuses any other option key, and a flag that is not a boolean, with
+`INVALID_ARGUMENT` before it reads the screen. Types catch these in
+TypeScript, but `e2e run` does not type-check, so the check runs for a
+JavaScript test or a computed option object too. Playwright options e2e does
+not implement, such as `indeterminate` on `toBeChecked` or `useInnerText` on
+`toHaveText`, fail this way instead of passing on the default.
+
+`toHaveText([...])` and `toContainText([...])` check a list, with no
+exactly-one rule; the failure message lists every text observed.
+`toHaveText([...])` needs the match count to equal the list length and the
+match at each position to satisfy the entry there, a string exactly after
+normalization, a `RegExp` by test; an empty list holds when nothing matches.
+`toContainText([...])` needs each entry contained by a distinct match, in
+list order, as Playwright's does: extra matches before, between, or after
+are fine, a repeated entry needs a match of its own, and an empty list always
+holds. Negated, it fails as soon as that ordered subsequence exists, so
+`not.toContainText(['Deleted'])` fails while any match contains `Deleted`.
+
+```ts
+await expect(screen.getByRole('status')).toHaveText('Saved');
+await expect(screen.getByRole('alert')).not.toContainText('error', { ignoreCase: true });
+await expect(screen.getByLabel('Subscribe')).toBeChecked({ checked: false });
+await expect(screen.getByTestId('todo')).toHaveCount(3);
+await expect(screen.getByTestId('todo')).toHaveText(['Write spec', /^Ship/, 'Release']);
+await expect(screen.getByTestId('todo')).toContainText(['spec', 'runner', 'Release']);
+await expect(screen.getByTestId('todo')).toContainText(['spec', 'Release']);
+await expect(screen.getByText('Loaded')).toBeAttached();
+await expect(screen.getByRole('dialog')).not.toBeVisible({ timeout: 10_000 });
+```
+
+## browser matchers
+
+Contributed by `@e2e-dev/web`; the type is exported from that package.
+Every matcher call is a recorded `expect.<matcher>` assertion step.
+
+```ts
+export interface BrowserExpectation {
+  /** Inverts the matcher. */
+  readonly not: BrowserExpectation;
+  /** Waits for the current URL to match; `ignoreCase` compares a string case-insensitively and adds the `i` flag to a RegExp, `false` removes it. */
+  toHaveURL(expected: string | RegExp, options?: { ignoreCase?: boolean; timeout?: number }): Promise<void>;
+  /** Waits for the current title to match. */
+  toHaveTitle(expected: TextMatch, options?: { timeout?: number }): Promise<void>;
+  /** Waits for the target's `class` attribute to match: a string is the whole normalized class list, a RegExp is tested against it. */
+  toHaveClass(target: Locator, expected: TextMatch, options?: { timeout?: number }): Promise<void>;
+}
+```
+
+A relative `toHaveURL` string resolves against the base URL and matches
+exactly after normalization; a `RegExp` tests the full URL. Anything else,
+such as a predicate function, is `INVALID_ARGUMENT`. `toHaveURL` also takes
+Playwright's `ignoreCase`, with the locator matchers' semantics. Otherwise each
+`browser` matcher takes `timeout` only; any other key, such as `ignoreCase` on
+`toHaveTitle`, which Playwright does not take either, is `INVALID_ARGUMENT`.
+
+`toHaveClass` polls for the node too: a target that matches nothing yet is one
+more poll, not a failure, until the assertion timeout runs out. An ambiguous
+target still fails at once with `LOCATOR_AMBIGUOUS`. It reads the `class`
+attribute, so `''` matches `class=""` and not an element with no `class`
+attribute at all; Playwright's `toHaveClass('')` accepts both.
+
+```ts
+await expect(browser).toHaveURL('/dashboard');
+await expect(browser).toHaveTitle(/Dashboard/);
+await expect(browser).toHaveClass(browser.locator('.card'), 'card active');
+```
+
+## Value matchers
+
+```ts
+export interface ValueExpectation<T> {
+  /** Inverts the matcher. */
+  readonly not: NegatedValueExpectation<T>;
+  /** Compares with Object.is. */
+  toBe(expected: T): void;
+  /** Performs recursive structural equality; `undefined` properties are ignored and class types are not compared. */
+  toEqual(expected: unknown): void;
+  /** Requires every property of `expected` to match recursively; extra properties on the value are fine, arrays must match element-wise with equal length. */
+  toMatchObject(expected: object): void;
+  /** Requires a truthy value. */
+  toBeTruthy(): void;
+  /** Requires a falsy value. */
+  toBeFalsy(): void;
+  /** Requires null. */
+  toBeNull(): void;
+  /** Requires undefined. */
+  toBeUndefined(): void;
+  /** Requires any value but undefined; null passes. */
+  toBeDefined(): void;
+  /** Requires a `length` property equal to `expected`: a string, an array, or anything array-like. */
+  toHaveLength(expected: number): void;
+  /** Requires the property at `path` to exist; with `expected`, to equal it by `toEqual` rules. */
+  toHaveProperty(path: PropertyPath, ...expected: [] | [expected: unknown]): void;
+  /** Requires string or collection containment. */
+  toContain(expected: unknown): void;
+  /** Requires a string or regexp match. */
+  toMatch(expected: string | RegExp): void;
+  /** Requires a numeric lower bound. */
+  toBeGreaterThan(expected: number): void;
+  /** Requires a numeric lower bound, inclusive. */
+  toBeGreaterThanOrEqual(expected: number): void;
+  /** Requires a numeric upper bound. */
+  toBeLessThan(expected: number): void;
+  /** Requires a numeric upper bound, inclusive. */
+  toBeLessThanOrEqual(expected: number): void;
+  /** Requires a number within `10 ** -digits / 2` of `expected`; `digits` defaults to 2. */
+  toBeCloseTo(expected: number, digits?: number): void;
+  /**
+   * Requires the value to pass a synchronous Standard Schema (Zod, Valibot,
+   * ArkType, ...) and returns the schema's output, typed:
+   * `const users = expect(await response.json()).toMatchSchema(Users)`.
+   * A schema that validates asynchronously is `INVALID_ARGUMENT`.
+   */
+  toMatchSchema<Schema extends StandardSchemaV1>(schema: Schema): StandardSchemaV1.InferOutput<Schema>;
+}
+
+/** `expect(value).not`: every value matcher inverted, none returning a value; `Back` is what `.not` returns to. */
+export type NegatedValueExpectation<T, Back = ValueExpectation<T>> = {
+  readonly not: Back;
+} & {
+  readonly [K in Exclude<keyof ValueExpectation<T>, 'not'>]: (...args: Parameters<ValueExpectation<T>[K]>) => void;
+};
+
+/** `expect.soft(value)`: the value matchers, with `toMatchSchema` returning `undefined` after a kept failure. */
+export type SoftValueExpectation<T> = Omit<ValueExpectation<T>, 'toMatchSchema' | 'not'> & {
+  readonly not: NegatedValueExpectation<T, SoftValueExpectation<T>>;
+  toMatchSchema<Schema extends StandardSchemaV1>(schema: Schema): StandardSchemaV1.InferOutput<Schema> | undefined;
+};
+
+/** A class, abstract or not: what `expect.any` takes. */
+export type Class = abstract new (...args: never[]) => unknown;
+
+/** A property path for `toHaveProperty`: dotted (`'user.address.city'`) or one key per element (`['user', 'address', 'city']`). */
+export type PropertyPath = string | readonly (string | number)[];
+```
+
+Value matchers run synchronously without retrying. For a value that may still
+change, use [Polling a value](#polling-a-value).
+
+```ts
+const total = await screen.getByTestId('total').textContent();
+expect(total).toContain('$');
+expect(items).toHaveLength(3);
+expect(payload).toEqual({ ok: true });
+expect(order).toMatchObject({ customer: { name: 'Ada' }, lines: [{ sku: 'a' }, { sku: 'b' }] });
+expect(order).toHaveProperty('customer.email', 'ada@example.test');
+expect(totals.lineTotal).toBeCloseTo(60);
+```
+
+`toEqual` compares structure the way Jest's does: primitives with `Object.is`
+(so `NaN` equals `NaN` and `0` does not equal `-0`), arrays and plain objects
+by their contents, `Date` by time, `RegExp` by source and flags, `Map` and
+`Set` by their entries. A property whose value is `undefined` is treated as
+absent, a sparse array equals one holding `undefined`, and a class instance
+equals a plain object with the same properties. There is no `toStrictEqual`.
+
+`toMatchObject` reads `expected` as a subset: every property it names must
+match recursively, properties it does not name are ignored. An array in
+`expected` matches an array of the same length, element by element, each
+element again as a subset. Both sides must be objects; a primitive on either
+side is refused.
+
+`toHaveProperty` walks a dotted path or an array of keys. Use the array form
+when a key contains a dot, or to index an array by number
+(`['lines', 0, 'sku']`). Inherited properties count; a property holding
+`undefined` exists. A string, number, or boolean on the path is read through
+its wrapper object, as in Jest, so `toHaveProperty('label.length', 3)` and
+`toHaveProperty(['label', 0], 'a')` reach into a string; `null` and
+`undefined` have no properties. With a second argument the value at the path
+must equal it by `toEqual` rules.
+
+### Matching a schema
+
+`toMatchSchema` validates a value against a
+[Standard Schema](https://standardschema.dev): a Zod, Valibot, or ArkType
+schema, or any library that implements the spec. Pass the schema your app
+already parses its API with, and the test fails when the API drifts from it.
+It returns the schema's output, typed, so the rest of the test reads
+properties without casting:
+
+```ts
+import { z } from 'zod';
+
+const User = z.object({ id: z.number(), name: z.string(), email: z.email() });
+
+const users = expect(await response.json()).toMatchSchema(z.array(User));
+expect(users.map((user) => user.name)).toContain('Ada');
+```
+
+A failure lists every issue by its path (`1.email: Invalid email address`).
+The output is the schema's, so defaults and transforms apply. A matcher
+returns before anything could await it, so a schema that validates
+asynchronously (an async refinement) is `INVALID_ARGUMENT`. Negated, it
+passes when the value does not match and returns nothing.
+
+A matcher that cannot evaluate its value (`toContain` on a number,
+`toHaveLength` on an object without one) fails as `ASSERTION_FAILED` like a
+mismatch would, so under `expect.poll` a value that has not taken its final
+shape yet is one more failing sample. A `toMatch` pattern that is neither a
+string nor a `RegExp` is `INVALID_ARGUMENT`.
+
+The unit-runner matchers (`toThrow`, `toBeInstanceOf`, `toBeNaN`,
+`toStrictEqual`, `resolves`, `rejects`, `expect.extend`) are not part of
+`expect`. An end-to-end test checks what the app shows and what its API
+returns; the value matchers cover that, see
+[API](/api-testing). Code-level
+checks belong in the unit runner.
+
+Pass a second argument to describe the check in its failure message:
+
+```ts
+expect(created, 'the company exists through the API').toBeTruthy();
+// ASSERTION_FAILED: the company exists through the API: expected undefined to be truthy
+```
+
+Only value expectations take a message; a locator or `browser` expectation
+already names its locator and matcher in the failure.
+
+## Asymmetric matchers
+
+An asymmetric matcher stands in for a value inside `toEqual`,
+`toMatchObject`, the collection form of `toContain`, and the value of
+`toHaveProperty`. Where the comparison would test equality, it asks the
+matcher instead. They are Jest's matchers, with Jest's rules.
+
+```ts
+/**
+ * A stand-in for a value inside `toEqual`, `toMatchObject`, `toContain`, and
+ * `toHaveProperty`: `expect.any(Number)` in place of a number,
+ * `expect.objectContaining({ id: 1 })` in place of a record. The structural
+ * matchers ask it whether a value matches instead of comparing.
+ */
+export interface AsymmetricMatcher {
+  /** Whether `other` satisfies the matcher. */
+  asymmetricMatch(other: unknown): boolean;
+  /** The matcher's name, `ObjectContaining`; a failure message adds the sample. */
+  toString(): string;
+}
+```
+
+| Matcher | Matches |
+| --- | --- |
+| `expect.any(Class)` | An instance of the class. For `String`, `Number`, `Boolean`, `BigInt`, `Symbol`, and `Function`, the primitive too; for `Object`, anything `typeof` calls an object, `null` included |
+| `expect.anything()` | Anything but `null` and `undefined` |
+| `expect.objectContaining(sample)` | An object whose properties include every property of `sample`, each compared by `toEqual` rules |
+| `expect.arrayContaining(sample)` | An array holding every element of `sample`, in any order, each compared by `toEqual` rules |
+| `expect.stringContaining(text)` | A string with `text` as a substring |
+| `expect.stringMatching(text \| RegExp)` | A string the RegExp tests true on; a text sample is compiled to a RegExp, so `'a.b'` matches `'axb'` |
+
+```ts
+expect(created).toEqual({
+  id: expect.stringMatching(/^usr_/),
+  createdAt: expect.any(String),
+  roles: expect.arrayContaining(['member']),
+  profile: expect.objectContaining({ name: 'Ada' }),
+});
+expect(rows).toContain(expect.objectContaining({ status: 'paid' }));
+expect(response).toHaveProperty('body.total', expect.any(Number));
+```
+
+In a failure message a matcher prints as its description: `Any<Number>`,
+`ObjectContaining {"name":"Ada"}`. Matchers nest: an `objectContaining`
+sample may hold an `expect.any`. The string form of `toContain` takes a
+string only, so `expect('abc').toContain(expect.stringContaining('a'))` is
+refused.
+
+## Soft assertions
+
+`expect.soft(actual)` takes what `expect(actual)` takes and returns the same
+matchers. A soft matcher that fails does not throw: the failure is kept on the
+running attempt and the body continues. Once the body has settled, and before
+`afterEach`, the attempt fails with one `ASSERTION_FAILED` that lists every
+kept failure in order. The error's source line is the first soft matcher that
+failed.
+
+```ts
+test('checkout summary', async ({ agent, screen }) => {
+  await agent.act('add the "Pro" plan to the cart and open the summary');
+  expect.soft(await screen.getByTestId('subtotal').textContent()).toBe('$40.00');
+  expect.soft(await screen.getByTestId('tax').textContent()).toBe('$8.00');
+  await expect.soft(screen.getByRole('button', 'Pay')).toBeEnabled();
+  await expect(screen.getByTestId('total')).toHaveText('$48.00');
+});
+```
+
+```text
+ASSERTION_FAILED: 2 soft assertions failed
+1. expected "$40.00" to be "$41.00"
+2. expect.toBeEnabled failed
+   locator: getByRole('button', 'Pay')
+   expected: enabled
+   observed: states: disabled (match count 1)
+```
+
+A soft locator or `browser` matcher is still a recorded `expect.<matcher>` step,
+marked failed, so the report shows where in the flow it landed. A soft value
+matcher is not a step, the same as a hard one; its failure appears in the
+attempt's error records.
+
+When the body throws on its own, or times out, that error stays the
+attempt's verdict and the soft failures are recorded beside it under
+`secondaryErrors`. A body that skips itself with `test.skip(...)` keeps them
+there too. The CLI shows `Skipped After Failure`; set
+[`failOnSkippedFailure: true`](/reference/config) to make that run fail with
+exit code 1. Without that option, the test stays skipped and does not affect
+the exit code.
+
+A soft `toMatchSchema` returns the schema's output when the value matches
+and `undefined` after a kept failure, and its type says so.
+
+Outside a test body there is nothing to keep a failure for, so `expect.soft`
+throws at once like `expect`: in a standalone script, and in an `afterEach`
+hook, which runs after the soft failures have been settled. There is no
+`expect.soft.poll`; `expect.poll` has its own timeout to fail on.
+
+## Polling a value
+
+`expect.poll(read)` re-reads a value until a matcher passes. Use it to wait for
+an API response or saved data after an app action.
+
+```ts
+export interface PollOptions {
+  /** Deadline in milliseconds. Default 5000. */
+  timeout?: number;
+  /** Pause between reads in milliseconds. Default 100. */
+  interval?: number;
+  /** Extra line in the timeout error, after the matcher line. */
+  message?: string;
+}
+
+/**
+ * The asynchronous form of every `ValueExpectation<T>` matcher: the same
+ * names and parameters, each resolving once the re-read value passes;
+ * `toMatchSchema` resolves to the schema's output for the passing read.
+ * Derived from `ValueExpectation<T>` so the two cannot drift.
+ */
+export type PollExpectation<T> = {
+  readonly not: NegatedPollExpectation<T>;
+} & {
+  readonly [K in Exclude<keyof ValueExpectation<T>, 'not' | 'toMatchSchema'>]: (
+    ...args: Parameters<ValueExpectation<T>[K]>
+  ) => Promise<void>;
+} & {
+  toMatchSchema<Schema extends StandardSchemaV1>(schema: Schema): Promise<StandardSchemaV1.InferOutput<Schema>>;
+};
+
+/** `expect.poll(read).not`: every poll matcher inverted, none resolving to a value. */
+export type NegatedPollExpectation<T> = {
+  readonly not: PollExpectation<T>;
+} & {
+  readonly [K in Exclude<keyof ValueExpectation<T>, 'not'>]: (...args: Parameters<ValueExpectation<T>[K]>) => Promise<void>;
+};
+```
+
+Every value matcher is available, returning a promise. Each sample calls
+`read` and runs the matcher. A matcher failure or a `read` that throws is one
+failing sample; a `read` that hangs is cut at the deadline.
+
+The timeout defaults to `config.assertionTimeout` during an attempt and
+5000 ms outside one. It is capped by the test deadline in the body, or the
+hook's `cleanupTimeout` during `afterEach`.
+
+When the attempt is cancelled or times out, the loop and any read in flight
+stop with `CANCELLED`. `timeout` must be a finite number 0 or more and
+`interval` a finite number above 0; anything else is `INVALID_CONFIG` before
+the first read.
+
+At the deadline it throws `ASSERTION_FAILED` naming the matcher, then
+`message` when given, then the last sample: the last matcher failure, the
+last `read` error, or `no read completed`.
+
+```text
+expect.poll(...).toBe(...) timed out after 5000 ms
+the batch never finished
+last: expected "running" to be "done"
+```
+
+```ts
+await agent.act('create a test named "AI checkout regression" described as {description}', {
+  params: { description },
+});
+await expect
+  .poll(() => getTest(workspace).then((row) => row?.title), { timeout: 15_000 })
+  .toBe('AI checkout regression');
+await expect.poll(async () => (await listTests(workspace)).length).toBeGreaterThan(1);
+await expect.poll(() => readStatus(), { message: 'the batch never finished' }).not.toBe('running');
+```
+
+`expect.poll` is not recorded as a report step; a timeout surfaces only as
+the test's failure.
+
+Await every poll. A poll belongs to the phase that started it: the test body
+(with its fixtures and `beforeEach` hooks), one `afterEach` hook or fixture
+teardown, or one `beforeAll` or `afterAll` hook. When that phase returns while
+the poll still runs, the poll is cancelled and the phase fails with
+`STEP_NOT_AWAITED` at the line of the call, whether or not the poll would
+have passed. It never fails a later test: a poll started by work its phase
+left running, such as a body past its timeout, is cancelled before its first
+read. A body that threw keeps its own
+error and records this one under `secondaryErrors`, and a suite hook reports
+it as `HOOK_FAILED`.

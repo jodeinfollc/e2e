@@ -1,0 +1,184 @@
+---
+title: Coding agents
+description: Give a coding agent the skill, a live app session, and reports it can use to write and debug tests.
+icon: "robot"
+---
+
+`e2e init` installs a skill for writing and running tests, plus MCP
+configuration for inspecting the app. Coding agents use the CLI to run
+tests and the reports to investigate failures.
+
+## The skill
+
+<CodeGroup>
+```bash npm
+npx e2e init
+```
+
+```bash pnpm
+pnpm dlx e2e init
+```
+
+```bash bun
+bunx e2e init
+```
+</CodeGroup>
+
+| Path | Used by |
+| --- | --- |
+| `.agents/skills/e2e/` | Agents that read `.agents/skills` |
+| `.claude/skills/e2e/` | Claude Code; a symlink to `.agents/skills/e2e/` when both are installed |
+
+The copy holds `SKILL.md` and topic references; the link is the layout
+`npx skills add` produces, so one copy serves every agent. Run `init` again
+after upgrading e2e to refresh it.
+
+Without `init`, `npx skills add tester-army/e2e` installs the skill from the
+repository, and `npx e2e guide [topic]` prints it from the
+installed package.
+
+The package also ships these docs as `.mdx` pages in its `docs/` directory
+(`node_modules/e2e/docs` in a single-package project), so an agent can read
+any page offline. A link such as `/reference/cli` is `docs/reference/cli.mdx`.
+
+For agents that need an explicit pointer, add this line to your project
+instructions. `init` leaves those files unchanged:
+
+```md title="AGENTS.md"
+End-to-end tests use e2e; read .agents/skills/e2e/SKILL.md before writing or running one.
+```
+
+## How an agent looks at the app
+
+`e2e mcp` lets the coding agent open and interact with the app. Each agent,
+subagents included, opens its own session, so several can drive the app at
+once. Its `locate` tool checks a `screen.*` locator against the current app and returns
+the test code when exactly one element matches.
+
+`init` registers the server in `.mcp.json` for Claude Code and
+`.cursor/mcp.json` for Cursor. To register it with Claude Code by hand:
+
+<CodeGroup>
+```bash npm
+claude mcp add e2e -- npx e2e mcp
+```
+
+```bash pnpm
+claude mcp add e2e -- pnpm exec e2e mcp
+```
+
+```bash bun
+claude mcp add e2e -- bunx e2e mcp
+```
+</CodeGroup>
+
+See the [MCP server reference](/reference/mcp) for its tools, session rules,
+and flags. Run tests and read reports through the CLI.
+
+## How an agent writes a test
+
+The skill tells the coding agent to read the config and an existing test
+first. It uses `agent.act` for one goal at a time and checks the outcome
+with `expect`. Known fields and exact values can use `screen` directly:
+
+```ts title="tests/checkout.e2e.ts"
+import { test, expect, credentials } from 'e2e';
+
+test('a signed-in user reaches checkout', async ({ screen, app, agent }) => {
+  const user = credentials.user('customer');
+  await app.open('/login');
+  await screen.getByLabel('Email').fill(user.username);
+  await screen.getByLabel('Password').fill(user.password);
+  await screen.getByRole('button', 'Sign in').click();
+  await expect(screen.getByRole('heading', 'Welcome back')).toBeVisible();
+
+  await agent.act('Add the cheapest item on the page to the cart and open the cart');
+  await expect(screen.getByRole('heading', 'Your cart')).toBeVisible();
+});
+```
+
+The main rules are:
+
+- One `agent.act` per goal, followed by an `expect`. The assertion makes the
+  step's cache entry eligible for replay, and it is what fails when the agent
+  did the wrong thing.
+- No sleeps. Locators poll, actions wait for their target, and `expect`
+  retries until its timeout.
+- Secrets through `credentials.user(name)`, declared in the config, never
+  literal in a test.
+
+## How an agent runs it
+
+<CodeGroup>
+```bash npm
+npx e2e run tests/checkout.e2e.ts
+```
+
+```bash pnpm
+pnpm exec e2e run tests/checkout.e2e.ts
+```
+
+```bash bun
+bunx e2e run tests/checkout.e2e.ts
+```
+</CodeGroup>
+
+Run one file while iterating. For model configuration and credentials, see
+[Models](/models). Fix CLI, config, and collection errors before
+retrying a run.
+
+## How an agent reads the result
+
+Every run that gets to its tests writes `.e2e/report.json`. For a report that is easier to read,
+run:
+
+<CodeGroup>
+```bash npm
+npx e2e run tests/checkout.e2e.ts --reporter list,markdown
+```
+
+```bash pnpm
+pnpm exec e2e run tests/checkout.e2e.ts --reporter list,markdown
+```
+
+```bash bun
+bunx e2e run tests/checkout.e2e.ts --reporter list,markdown
+```
+</CodeGroup>
+
+This writes `.e2e/summary.md` and a page for each failed or flaky test under
+`.e2e/failures/`. Start with the failure page. It includes the failing line,
+steps, recent model turns, and the screen at failure.
+
+When reading JSON, check `run.errors` for run-level failures, then the last
+attempt of each failed result. Its `error`, `steps`, and `artifacts` show
+what failed and how far the test got. `--reporter json` also prints the JSON
+report to stdout.
+
+For model-call details, use `--ai-trace` and read the trace with
+[unbox-ai](/debugging#agent-steps). Avoid opening the raw trace in an agent's
+context; it repeats prompts and can be several megabytes.
+
+## How an agent treats the cache
+
+A verified `agent.act` can replay from `.e2e/cache/` on later runs. Use
+`--no-cache` to check the live agent behavior after changing a test or to
+investigate a replay failure. Pair it with `--ai-trace` to capture every
+model call in the flow.
+
+Do not edit recordings by hand. A failed read-write run removes implicated
+entries so a later verified run can replace them. A failure where no model
+answered implicates nothing and removes none. See
+[Caching](/cache).
+
+<CardGroup cols={2}>
+  <Card title="CLI reference" icon="terminal" href="/reference/cli">
+    init, guide, mcp, and run, flag by flag.
+  </Card>
+  <Card title="MCP server" icon="server" href="/reference/mcp">
+    Inspect the app before writing a test.
+  </Card>
+  <Card title="Debugging a run" icon="bug" href="/debugging">
+    The report, the artifacts, and the agent flags.
+  </Card>
+</CardGroup>

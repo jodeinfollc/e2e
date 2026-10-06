@@ -1,0 +1,304 @@
+---
+title: Debugging a run
+description: Read the report, open the evidence, watch the browser, and see what the model was sent.
+icon: "magnifying-glass"
+---
+
+Start with the failure in the terminal. Every run also writes
+`.e2e/report.json`, with links to the screenshots, traces, downloads, and
+recordings captured by the selected engine.
+
+## Read the failure
+
+The `list` reporter's `Failed Tests` section shows the error, failing line,
+and screen at failure. For a failed locator, it also lists nearby matches
+that may explain the problem. The exit code identifies the failure type:
+
+| Exit | Meaning | Retry the job? |
+| ---: | --- | --- |
+| 1 | A test failed | Only if the test is flaky |
+| 2 | Configuration, collection, or policy | Fix the reported problem first |
+| 3 | Engine, app process, model provider, or artifact failure | If the cause is temporary |
+| 4 | An internal runner error | Report it |
+| 130 | The run was interrupted | |
+
+## The failure pages
+
+Use `--reporter list,markdown` to write `.e2e/summary.md` and a page for each
+failed or flaky test under `.e2e/failures/`. A failure page includes the
+source line, steps, recent model turns, and screen text:
+
+````markdown
+# ✗ todos › archives a todo
+
+`tests/todos.e2e.ts` · failed · 16.2s
+
+**ASSERTION_FAILED**
+
+```text
+agent.act failed: the todo exposes only a "Delete" button; no "Archive" button is present.
+```
+
+Look at: `tests/todos.e2e.ts:8`
+Failed the same way on both attempts: **ASSERTION_FAILED** at step 2.
+
+## Steps
+1. ✓ `app.open` "/todos" (35ms) — `tests/todos.e2e.ts:4`
+2. ✗ `agent.act` "Archive the todo" (16.1s, 6 model calls) — **ASSERTION_FAILED** — `tests/todos.e2e.ts:8`
+
+## Agent turns of step 2
+**Turn 2** `tap({"target":"n19"})`
+> Tapped #n19.
+> Screen changes since revision b4 (now revision b6, path /todos, 29 nodes): 4 added, 2 changed.
+> added #n29 button "Delete Groceries"
+
+## Screen at failure
+URL: `http://127.0.0.1:3000/todos`
+```text
+#n18 textbox "New todo"
+#n19 button "Add"
+ #n34 listitem "Groceries" testid="todo"
+  #n37 button "Delete Groceries"
+```
+````
+
+`Look at` points to the failing call. Assertion failures include expected
+and observed values; locator failures include the requested locator and
+nearby matches. Repeated failure details help you compare attempts. The
+runner spends at most 5 s capturing the screen and screenshot once per failed
+attempt; an app that does not answer in time gets no screen section.
+
+## The report
+
+Use `.e2e/report.json` for scripts and integrations. `--reporter json` prints
+the same document to stdout:
+
+```bash
+jq '.run | {status, exitCode, errors}' .e2e/report.json
+jq '.run.results[] | select(.status != "passed") | {titlePath, file, status}' .e2e/report.json
+jq '.run.results[] | select(.status != "passed") | .attempts[-1]
+    | {status, error, failure, steps: [.steps[] | select(.status != "passed") | {api, label, source, status, error}], artifacts}' .e2e/report.json
+```
+
+Check `run.errors` for run-level failures, then the last attempt of each
+failed result:
+
+- `error` contains the code, message, source line, and assertion details.
+- `failure` identifies the screen and screenshot artifacts and any locator
+  candidates.
+- `steps` shows the calls leading to the failure. Failed agent steps include
+  recent model turns.
+- `artifacts` lists the captured files.
+
+## Artifacts
+
+Artifacts land under `.e2e/artifacts/` (`<output>/artifacts/` when the
+[`output`](/reference/config#output) is moved), one directory per attempt.
+Each run empties it first, so it holds the latest run's evidence. A
+`--last-failed` rerun instead empties it down to the files the report it
+reruns names, and writes its own under `rerun-<n>/`:
+
+- **Screenshots.** Failed attempts capture one whenever the engine can and
+  pixels are allowed. The built-in `agent.assert` also captures one after
+  either verdict unless `screenshot: false` disables it. Capture can fail or
+  be withheld. Use `app.screenshot('label')` to capture one explicitly.
+- **Playwright traces** on the attempts the [`trace`](/reference/config#trace)
+  mode records: every attempt locally, the first retry in CI. Open one with
+  `npx playwright-core@1.63.0 show-trace <file>` (`pnpm dlx` under pnpm);
+  `--trace off` skips the cost for one run, `--trace` records every attempt
+  of a CI run.
+- **Downloads** saved through `browser.waitForDownload`, recorded with kind
+  `download`. They are the app's bytes: `redaction: "incomplete"` unless the
+  session knows a secret value and the file is text, which the runner rewrites and
+  marks `complete`.
+- **Videos** and **agent transcripts** when you ask for them; see below.
+
+After a secret fill, no screenshots are taken for the rest of the attempt; see
+[screenshots after a secret fill](/security#screenshots-after-a-secret-fill).
+
+Playwright traces and videos need separate care. Trace redaction replaces
+secret text with `<secret:name>` and drops the trace's screencast frames, so
+the viewer shows actions, DOM snapshots, and network, but no filmstrip. An
+image the app served itself stays, even one that draws the secret. Videos
+mask nothing and are marked `redaction: "incomplete"`.
+
+If trace rewriting fails, the runner deletes the trace from the attempt's
+artifact directory. For a path outside that directory, it withholds the
+artifact with `TRACE_WITHHELD` and leaves the file untouched. See the
+[security model](/security#where-redaction-stops) for all redaction limits.
+
+## Watch it happen
+
+<CodeGroup>
+```bash npm
+npx e2e run --headed                      # a visible browser
+npx e2e run --video                       # record every attempt
+npx e2e run --video=retain-on-failure     # record every attempt, keep the failures
+```
+
+```bash pnpm
+pnpm exec e2e run --headed                      # a visible browser
+pnpm exec e2e run --video                       # record every attempt
+pnpm exec e2e run --video=retain-on-failure     # record every attempt, keep the failures
+```
+
+```bash bun
+bunx e2e run --headed                      # a visible browser
+bunx e2e run --video                       # record every attempt
+bunx e2e run --video=retain-on-failure     # record every attempt, keep the failures
+```
+</CodeGroup>
+
+Each recording lands under its attempt's artifact directory. Playwright
+writes WebM, one file per page the attempt opened; agent-device writes MP4.
+The failure recap prints the path, or the URL of a recording a hosted
+browser keeps. Each recording carries `startedAt`, so a step's `startedAt`
+minus the recording's is where that step is in the video.
+
+To record without the flag, set `video` in the config. `on-first-retry` is
+the cheap CI mode: a test that passes first time records nothing, and a
+flaky one leaves a recording of its retry.
+
+```ts
+export default {
+  video: 'on-first-retry',
+  retries: 1,
+  targets: [
+    { name: 'chromium', engine: web(), app: { url } },
+    { name: 'firefox', engine: web({ browser: 'firefox' }), app: { url }, video: 'retain-on-failure' },
+  ],
+} satisfies E2EConfig;
+```
+
+A target's `video` wins over the config's, `--video` over both. A test's own
+option wins over all of them, which records one flow you are chasing
+without recording the suite. `trace` takes the same modes and follows the
+same order:
+
+```ts
+test('checkout', { video: 'on' }, async ({ agent }) => {
+  await agent.act('Buy the first product in the catalog');
+});
+```
+
+`--video [mode]` takes an optional value, so put test files before it or
+write `--video=<mode>`. The flag and the config's `video` apply to the targets
+whose engine can record, with one notice naming the rest. A mode set on a
+target or a test is required: an engine that cannot record it fails the run
+with `UNSUPPORTED_ARTIFACT` before any test starts.
+[Recording](/reference/config#recording) has every mode and file.
+
+## Console output
+
+`console.log` and `console.error` inside a test print as the test runs, above
+the live view, under a heading that names the stream, the target, the file,
+and the test:
+
+```text
+stdout | web tests/todos.e2e.ts > adds a todo
+hello from the test
+```
+
+Output from outside a test, such as a test file's top level or a reporter,
+prints under `stdout | runner` or `stderr | runner`. Both streams print on
+stdout, in a pipe or a CI log too. Without the `list` reporter, output
+goes to its own stream as written.
+
+Secret values are [redacted](/security#redaction). Output printed while the
+config loads appears once it has loaded, before the run header, and is
+dropped for a warning if the load fails. Every other line appears when it
+is written. The output is not part of the report; use `expect` or an
+artifact for anything a later reader needs.
+
+## Agent steps
+
+Use these flags to inspect agent behavior:
+
+<CodeGroup>
+```bash npm
+npx e2e run --debug     # timings and a step table on stderr
+npx e2e run --ai-trace  # every model call, for a trace viewer
+npx e2e run --no-cache  # run the agent live instead of replaying
+```
+
+```bash pnpm
+pnpm exec e2e run --debug     # timings and a step table on stderr
+pnpm exec e2e run --ai-trace  # every model call, for a trace viewer
+pnpm exec e2e run --no-cache  # run the agent live instead of replaying
+```
+
+```bash bun
+bunx e2e run --debug     # timings and a step table on stderr
+bunx e2e run --ai-trace  # every model call, for a trace viewer
+bunx e2e run --no-cache  # run the agent live instead of replaying
+```
+</CodeGroup>
+
+`--debug` appends two tables after the reporter's output: phase timings for
+the run, and one row per agent step with its duration, model calls, tokens,
+prompt-cache share, and cost when the provider reports one. Each planned
+step also saves its model transcript as an artifact.
+
+```console
+[e2e debug] agent steps (execution order, model anthropic/claude-sonnet-4.5, total $0.0312)
+  step                                   total   model  observe  action  calls  tokens in/out  cached       cost
+  act "add a todo named groceries"       3.9s    2.8s    410ms   620ms      3  9412/388       61% (5740)   $0.0198
+  assert "the list shows groceries"      1.2s    1.1s     88ms     0ms      1  3120/41        0% (0)       $0.0114
+```
+
+`--ai-trace` writes model requests and responses to `.e2e/ai-trace.json`.
+Read it with [unbox-ai](https://github.com/tester-army/unbox-ai) to inspect
+prompts, tool calls, and token usage:
+
+<CodeGroup>
+```bash npm
+npx unbox-ai runs .e2e/ai-trace.json
+npx unbox-ai summary .e2e/ai-trace.json --run 1
+```
+
+```bash pnpm
+pnpm dlx unbox-ai runs .e2e/ai-trace.json
+pnpm dlx unbox-ai summary .e2e/ai-trace.json --run 1
+```
+
+```bash bun
+bunx unbox-ai runs .e2e/ai-trace.json
+bunx unbox-ai summary .e2e/ai-trace.json --run 1
+```
+</CodeGroup>
+
+Each agent step appears as a run in the AI trace, with one entry per model
+call. It contains the redacted input sent to the model; image bytes are
+replaced with byte counts. Use unbox-ai to inspect it instead of reading the
+large raw JSON file.
+
+Replayed steps make no model call and leave no AI trace. Add `--no-cache`
+when you need to inspect the whole flow or rule out a stale recording. See
+[Caching](/cache).
+
+## Common errors
+
+| Code | Usual cause | Fix |
+| --- | --- | --- |
+| `APP_UNREACHABLE` | Nothing answers at `app.url`, or `app.command` never became ready; on a device, the message may name the iOS automation runner instead (busy, wedged, or a snapshot it could not present) | Set `app.command.log` and read it; check the port; raise `app.command.startupTimeout`. For the runner, follow the recovery in the message: `npx agent-device daemon stop`, reboot the simulator (see [Mobile](/mobile#troubleshooting)) |
+| `APP_ALREADY_RUNNING` | Something already serves `app.url` when the runner wanted to start `app.command` | Stop it, or set `reuseExisting: true` for local runs |
+| `LOCATOR_NOT_FOUND` | Wrong role or name, text not exact, element inside an iframe, page not open | Read the markup for the accessible name; try `exact: false`; `browser.frameLocator` for iframes; `--headed` to look |
+| `LOCATOR_AMBIGUOUS` | Two matches: a hidden duplicate, a repeated label | Add `{ name }`, scope under a container, `filter`, `first()`, or `{ visible: true }` |
+| `ASSERTION_FAILED` | The expectation is wrong, or the state settles after 5 s; for `agent.assert`, the judgment was false | Compare with the screenshot; `{ timeout }` on the matcher; rewrite the question |
+| `ASSERTION_INCONCLUSIVE` | `agent.assert` asked about, or `agent.extract` asked for, something the screen does not show: the value is on another page, still loading, or only in pixels | Open or wait for the right screen first; ask about what is visible; add `vision: true` when the answer is in pixels (the message says so when the judge read the tree alone) |
+| `ACTION_FAILED` | Element covered, disabled, or detached, or an operation timed out | Wait on the right condition with `expect` first; close overlays |
+| `STEP_BUDGET_EXHAUSTED`, `STEP_TIMEOUT` | The agent ran out of actions, model calls, or time | Scope the goal to one step. Raise the agent entry's `maxSteps` or `maxModelCalls` for the budget, the config `timeout` for an `act` step, or the agent's `judgmentTimeout` for `assert`, `waitFor`, and `extract` |
+| `MODEL_UNAVAILABLE` | No model constructed in the config | See [Models](/models) |
+| `MODEL_PROVIDER_FAILED` | Bad key, rate limit, no credits, or every try of one request went 120 s without an answer | Check the key the provider reads and the quota; for a slow local model, a smaller screen (`agents.<name>.maxObservationBytes`) or a faster model |
+
+Every code, its class, and its exit code are in the
+[errors reference](/reference/errors).
+
+<CardGroup cols={2}>
+  <Card title="CLI reference" icon="terminal" href="/reference/cli#e2e-run">
+    Every flag of `e2e run`.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation" href="/reference/errors">
+    Every error code.
+  </Card>
+</CardGroup>

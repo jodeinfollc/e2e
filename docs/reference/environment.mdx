@@ -1,0 +1,121 @@
+---
+title: Environment variables
+description: Every variable the runner and the first-party engines read, and what each one does.
+icon: "dollar-sign"
+---
+
+These variables configure the runner and first-party packages. In the tables,
+`set` means the variable exists, `value` means it is not blank, and `flag`
+means it is not blank, `0`, or `false`. Flag values are case-insensitive.
+
+## Model
+
+Configure a model in `e2e.config.ts`. Its provider reads the API key:
+`gateway()` uses `AI_GATEWAY_API_KEY`, `openrouter()` uses
+`OPENROUTER_API_KEY`, and `openai()` uses `OPENAI_API_KEY`. Without
+`AI_GATEWAY_API_KEY`, `gateway()` uses a
+[Vercel OIDC token](/models#vercel-oidc-instead-of-a-key). A missing
+credential fails on the first model call. Subscription models use a stored
+login instead.
+See [Models](/models) and [Subscriptions](/subscriptions).
+
+| Variable | Reading | Effect |
+| --- | --- | --- |
+| `E2E_OAUTH_CREDENTIALS` | value | The stored subscription logins as JSON, the contents of `oauth.json`, for a machine nobody can sign in on. The `e2e/oauth/*` models and `e2e models` read it in place of `$XDG_CONFIG_HOME/e2e/oauth.json`; `e2e login` and `e2e logout` refuse to change it, and refreshed tokens are not written back |
+| `OPENCODE_API_KEY` | value | An OpenCode Console service account key; `opencodeConsole()` uses it in place of the stored `opencode-console` login; `e2e models` still reads the stored login. OpenCode reads the same variable |
+| `XDG_CONFIG_HOME` | value | Directory of the stored logins, `$XDG_CONFIG_HOME/e2e/oauth.json`; default `~/.config/e2e/oauth.json` |
+
+## Credentials and secrets
+
+| Variable | Reading | Effect |
+| --- | --- | --- |
+| `E2E_USER_<NAME>_USERNAME` | set | Replaces `credentials.<name>.username` |
+| `E2E_USER_<NAME>_PASSWORD` | set | Replaces `credentials.<name>.password` |
+| `E2E_SECRET_<NAME>` | set | Replaces the value of `secrets.<name>` |
+
+`<NAME>` is the name uppercased with every character outside `A-Z0-9`
+replaced by `_`, so `power-user` becomes `E2E_USER_POWER_USER_USERNAME`. Two
+credentials, or two secrets, whose names map to the same `<NAME>` (`api-key`
+and `api_key` both read `E2E_SECRET_API_KEY`; `svc-a` and `svc_a` both read
+`E2E_USER_SVC_A_USERNAME` and `_PASSWORD`) are `INVALID_CONFIG` at config
+load, whether or not a variable is set, so one rotation never replaces two
+entries; the message names the entries and the variables. A credential and a
+secret may share a name, since their prefixes differ. A
+variable for a name absent from the config is ignored. An empty value is
+`INVALID_CONFIG`, and so is a password or secret shorter than 6 characters
+(code points): redaction rewrites every occurrence of a value, and one that
+short would take ordinary text with it.
+
+## Run mode
+
+| Variable | Reading | Effect |
+| --- | --- | --- |
+| `CI` | flag | CI mode: `retries` defaults to 1 and `workers` to 1, `cache` defaults to `read-only`, a focused test is `ONLY_IN_CI`, and `reuseExisting` on an app command is ignored |
+
+## Diagnostics
+
+| Variable | Reading | Effect |
+| --- | --- | --- |
+| `NO_COLOR` | set | Plain CLI output. Colors are otherwise on for a TTY or in CI and off when piped |
+| `FORCE_COLOR` | set | Colored CLI output even when piped |
+| `TERM` | value | `dumb` draws the `e2e init` wordmark at rest, without animation, as in CI |
+| `GITHUB_SHA`, `GITHUB_HEAD_REF`, `GITHUB_REF_NAME` | value | The commit and branch the report records under `run.vcs` when `git` cannot read the project root. `GITHUB_HEAD_REF` wins over `GITHUB_REF_NAME` |
+
+`--debug` and `--ai-trace` are flags, not variables; see
+[CLI](/reference/cli#e2e-run).
+
+## Telemetry
+
+| Variable | Reading | Effect |
+| --- | --- | --- |
+| `E2E_TELEMETRY_DISABLED` | flag | Turns anonymous usage telemetry off. `e2e telemetry disable` saves the same choice in the preferences file |
+| `DO_NOT_TRACK` | flag | Same as `E2E_TELEMETRY_DISABLED` |
+| `E2E_TELEMETRY_DEBUG` | flag | Prints every telemetry event to stderr instead of sending it |
+| `E2E_TELEMETRY_FLEET` | value | Names the platform running e2e for its users; events are attributed to `fleet:<name>` instead of a per-machine id, no preferences file is written, and no notice is printed. A value that is not a plain token is sent as `other` |
+| `XDG_CONFIG_HOME` | value | Directory of the preferences file, `$XDG_CONFIG_HOME/e2e`; default `~/.config/e2e` |
+| `APPDATA` | value | The same on Windows, `%APPDATA%\e2e`; default `~/AppData/Roaming/e2e` |
+
+Telemetry also checks for the markers CI vendors and coding agents set. Only
+the derived name is sent.
+
+| Markers | Reported as |
+| --- | --- |
+| `GITHUB_ACTIONS`, `GITLAB_CI`, `CIRCLECI`, `BUILDKITE`, `JENKINS_URL`, `TRAVIS`, `BITBUCKET_BUILD_NUMBER`, `TF_BUILD`, `TEAMCITY_VERSION`, `CODEBUILD_BUILD_ID`, `VERCEL`, `NETLIFY`, `DRONE`, `SEMAPHORE`, `APPVEYOR`, `WOODPECKER` | `ci_name`: `github-actions`, `gitlab`, `circleci`, `buildkite`, `jenkins`, `travis`, `bitbucket`, `azure-pipelines`, `teamcity`, `aws-codebuild`, `vercel`, `netlify`, `drone`, `semaphore`, `appveyor`, `woodpecker`; `unknown` when only `CI` is set |
+| `CLAUDECODE`, `CLAUDE_CODE`, `CURSOR_AGENT`, `CURSOR_TRACE_ID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `CODEX_CI`, `GEMINI_CLI`, `COPILOT_GITHUB_TOKEN`, `COPILOT_MODEL`, `COPILOT_ALLOW_ALL`, `OPENCODE_CLIENT`, `AUGMENT_AGENT`, `ANTIGRAVITY_AGENT`, `REPL_ID`, `AI_AGENT` | `coding_agent`: `claude-code`, `cursor`, `codex`, `gemini-cli`, `copilot`, `opencode`, `augment`, `antigravity`, `replit`, `other` |
+| `WSL_DISTRO_NAME` | `wsl: true` |
+| `npm_config_user_agent` | `package_manager`: the invoking package manager. `e2e init` reads the same variable to pick the install command |
+
+What is sent and how to read it is on the [Telemetry](/telemetry) page.
+
+## Reporters
+
+`@e2e-dev/github` reads the variables GitHub Actions sets, when a run finishes:
+
+| Variable | Reading | Effect |
+| --- | --- | --- |
+| `GITHUB_ACTIONS` | value | Without it the reporter posts nothing and says so |
+| `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_EVENT_NAME`, `GITHUB_WORKFLOW`, `GITHUB_JOB` | value | Always set by the runner; a job missing one fails the reporter with the variable named. The repository and run id build the artifacts link, the event name is in the "not a pull request" row, and the workflow and job join the marker that lets a rerun find its own comment |
+| `GITHUB_TOKEN`, `GH_TOKEN` | value | The token the comment is posted with; the first one set wins. Unset, the job summary is still written |
+| `GITHUB_EVENT_PATH`, `GITHUB_REF` | value | The pull request number and head commit from the event payload, or the number from `refs/pull/N/merge` |
+| `GITHUB_SHA` | value | The commit source links point at when the event is not about a pull request |
+| `GITHUB_WORKSPACE` | value | The checkout root; source links add the project's path inside it, so a suite in a subdirectory links to the right file |
+| `GITHUB_SERVER_URL`, `GITHUB_API_URL` | value | The GitHub host, for Enterprise Server; `https://github.com` and `https://api.github.com` by default |
+| `GITHUB_STEP_SUMMARY` | value | The job summary file the comment text is appended to |
+
+## Engines
+
+| Variable | Reading | Effect |
+| --- | --- | --- |
+| `PLAYWRIGHT_BROWSERS_PATH` | value | Playwright's browser cache, honored by the engine's `prepare` hook |
+| `PLAYWRIGHT_SKIP_BROWSER_GC` | value | Defaults to `1` for the engine's browser install, so it keeps other browsers in the cache. Set `0` to let the install remove them |
+| `KERNEL_API_KEY` | value | The API key `kernel()` from `@e2e-dev/kernel` creates browsers with; unset, the browser lease fails. See [Kernel](/integrations/kernel) |
+| `EXPO_TOKEN` | value | The Expo access token `easSimulators()` from `@e2e-dev/eas` starts and stops simulator sessions with; unset, it uses the eas-cli login in `.expo/state.json` under `HOME` (`USERPROFILE` on Windows), and with neither the device lease fails. See [EAS Simulators](/integrations/eas) |
+| `HOME`, `USERPROFILE` | value | The home `easSimulators()` finds the eas-cli login under when `EXPO_TOKEN` is unset: `USERPROFILE` on Windows, `HOME` elsewhere, the OS user's home when unset |
+| `E2E_AGENT_DEVICE_POOL_<TARGET>_<digest>` | value | Written by `@e2e-dev/mobile` in `prepare` and read by each worker to find its booted device. Not meant to be set by hand |
+
+## What app processes inherit
+
+An app `command` receives `PATH`, `HOME`, `TMPDIR`, `TMP`,
+`TEMP`, `SystemRoot`, and `COMSPEC`, plus whatever `command.env` sets.
+`APP_URL` is read by the scaffolded config module, not the runner; pass it
+through `command.env` if the dev server needs it too.

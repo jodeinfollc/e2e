@@ -1,0 +1,476 @@
+---
+title: test
+description: Tests, setup tests, groups, hooks, options, and fixtures.
+icon: "flask-vial"
+---
+
+Declare tests, groups, and hooks synchronously while the test file is
+imported. Use `test.extend` to add fixtures and `test.skip` to skip a test at
+registration or during its body.
+
+```ts
+export interface TestAPI<Fixtures = TestFixtures> {
+  /** Registers one test synchronously during module evaluation. */
+  (title: string, fn: TestFn<Fixtures>): TestCase;
+  /** Registers one configured test synchronously during module evaluation. */
+  (title: string, options: TestOptions, fn: TestFn<Fixtures>): TestCase;
+  /** Registers one skipped test. */
+  skip(title: string, fn: TestFn<Fixtures>): TestCase;
+  /**
+   * Inside a running test: skips it when `condition` is true (or always,
+   * with no condition), ending the body there. The attempt is reported
+   * `skipped` with `reason`; steps that already ran stay in the report, and
+   * teardown still runs. A setup test cannot skip: its sessions are owed.
+   * Outside a test body this form is `COLLECTION_ERROR`; use the `skip`
+   * option to skip at collection.
+   */
+  skip(condition: boolean, reason?: string): void;
+  skip(reason?: string): void;
+  /** Registers one focused local test. CI rejects focused tests. */
+  only(title: string, fn: TestFn<Fixtures>): TestCase;
+  /** Registers one setup test with statically declared session outputs. */
+  setup(title: string, options: SetupOptions, fn: SetupFn<Fixtures>): TestCase;
+  /**
+   * Returns the same runtime `test`, typed with an engine's contributed
+   * fixtures. A pure type refinement, the fixtures still resolve from the
+   * target's engine at runtime, so a project types its device/desktop/web
+   * surface without a global `declare module` augmentation:
+   *
+   *   export const test = base.extend<{ device: Device }>();
+   */
+  extend<Extra>(): TestAPI<Fixtures & Extra>;
+  /**
+   * Returns a new `test` whose registrations carry these fixture
+   * definitions on top of the ones it already had. Each attempt sets them up
+   * in declaration order after the engine's fixtures, runs the hooks and the
+   * body with them, and tears them down in reverse order after `afterEach`:
+   *
+   *   export const test = base.extend<{ workspace: Workspace }>({
+   *     workspace: async ({ browser }, use) => {
+   *       const workspace = await createWorkspace();
+   *       await use(workspace);
+   *       await workspace.cleanup();
+   *     },
+   *   });
+   */
+  extend<Extra>(fixtures: FixtureDefinitions<Fixtures, Extra>): TestAPI<Fixtures & Extra>;
+  /** Declares a group synchronously. */
+  describe<Result>(title: string, body: SynchronousBody<Result>): void;
+  /** Declares a configured group synchronously. */
+  describe<Result>(
+    title: string,
+    options: DescribeOptions,
+    body: SynchronousBody<Result>,
+  ): void;
+  /** Registers a test-attempt setup hook. */
+  beforeEach(fn: TestHookFn<Fixtures>): void;
+  /** Registers a test-attempt teardown hook. */
+  afterEach(fn: TestHookFn<Fixtures>): void;
+  /** Registers a suite-instance setup hook. */
+  beforeAll(fn: SuiteHookFn): void;
+  /** Registers a suite-instance teardown hook. */
+  afterAll(fn: SuiteHookFn): void;
+}
+
+export const test: TestAPI;
+export const describe: TestAPI['describe'];
+export const beforeEach: TestAPI['beforeEach'];
+export const afterEach: TestAPI['afterEach'];
+export const beforeAll: TestAPI['beforeAll'];
+export const afterAll: TestAPI['afterAll'];
+```
+
+`describe` and the four hooks are also top-level exports, the same functions
+as `test.describe` and `test.beforeEach` and the rest:
+`import { describe, beforeEach, test } from 'e2e'`. A per-test hook imported
+from `e2e` is typed with the core fixtures. `@e2e-dev/web` and
+`@e2e-dev/mobile` export `test`, `describe`, and all four hooks typed with
+their `browser` or `device` fixture, so a test file registers from one
+import, and a `test` you extended with your own fixtures registers hooks
+that see them through `test.beforeEach`.
+
+Registering a test, group, or hook outside module evaluation throws
+`COLLECTION_ERROR`.
+
+A test or group title is 1 through 512 UTF-8 bytes after NFC normalization,
+with no NUL character. Two tests in one file with the same title path, the
+group titles and then the test's own, are a `COLLECTION_ERROR`.
+
+## Members
+
+A skipped test does not affect the exit code by default. With `test.only`, other tests
+are reported as `filtered`, and a CI run fails with `ONLY_IN_CI`.
+
+Call `test.skip(condition, reason)` inside a test for conditions you learn at
+runtime, such as a disabled feature flag. When the condition is true, the call
+throws: the body stops at that line, as Playwright's does, and the test is
+reported `skipped` with `reason`, with no retry. Nothing after the call runs.
+Steps before it stay in the report as they ran. Soft failures before the call
+remain in the attempt's `secondaryErrors`, and the CLI lists the test under
+`Skipped After Failure`. A failed attempt followed by a skip on retry appears
+there too, with its original error. Hooks and fixtures still run their teardown.
+When the condition is a precondition, call it first, before any step.
+
+Set [`failOnSkippedFailure: true`](/reference/config) to fail the run with exit
+code 1 when a runtime skip follows a failure in that test. The test remains
+`skipped` with its reason, and the skip does not trigger another retry. Clean
+skips and retries that pass are unaffected. The default is `false`.
+
+A setup test cannot skip because other tests depend on its sessions; the
+call fails with `INVALID_ARGUMENT`. Outside a test body, the conditional
+form is `COLLECTION_ERROR`. Use the `skip` option when declaring the test.
+
+```ts
+test('switches organizations', { session: 'admin' }, async ({ app, agent }) => {
+  const organizations = await listOrganizations();
+  test.skip(organizations.length < 2, 'the demo tenant has a single organization');
+  await app.open('/backend');
+  await agent.act(`switch to the organization "${organizations[1].name}"`);
+});
+```
+`test.setup` must be top-level, not inside `describe`. An `async`
+`describe` body is a type error and a `COLLECTION_ERROR`.
+
+```ts
+import { describe, test } from '@e2e-dev/web';
+import { expect } from 'e2e';
+
+test('app opens', async ({ app, browser }) => {
+  await app.open();
+  await expect(browser).toHaveURL('/');
+});
+
+test('checks out', { tags: ['billing'], retries: 2, timeout: 60_000 }, async ({ app }) => {
+  await app.open('/checkout');
+});
+
+describe('checkout', { tags: ['smoke'], serial: true }, () => {
+  test('adds an item', async ({ screen }) => {});
+  test('pays', async ({ screen }) => {});
+});
+```
+
+`test.setup` declares the sessions it saves, and must save each exactly once:
+
+```ts
+import { credentials } from 'e2e';
+
+test.setup('authenticate', { sessions: ['member'] }, async ({ app, screen, session }) => {
+  await app.open('/login');
+  await screen.getByLabel('Email').fill(credentials.user('member').username);
+  await screen.getByLabel('Password').fill(credentials.user('member').password);
+  await screen.getByRole('button', 'Sign in').tap();
+  await session.save('member');
+});
+```
+
+Session names must match `/^[A-Za-z0-9_.-]{1,128}$/` and be unique.
+Not saving a declared session, or saving one twice, throws `SESSION_CONTRACT`
+at runtime.
+
+```ts
+export interface SetupSession {
+  /** Saves state under a setup-declared name. */
+  save(name: string): Promise<void>;
+}
+```
+
+## Hooks
+
+`beforeEach` hooks run outermost group first, then in declaration order
+within a group. `afterEach` hooks run innermost first, in reverse declaration
+order, after a failure or timeout too. `beforeAll` runs once per suite
+instance on first entry into the scope; `afterAll` when the scope's last test
+in the realm finishes. Hook order follows scope nesting, not position in the
+file, so a hook declared after a test still applies to it.
+
+The module is re-imported for every retry, serial group, and setup test, so
+`beforeAll` runs again in each. A scope's `afterAll` runs as soon as its last
+test in that realm is done. A realm that a failure discards runs `afterAll`
+for every scope whose `beforeAll` started.
+
+`beforeEach` and the body share the test timeout. Each `afterEach` hook gets
+its own `cleanupTimeout` budget with working fixtures, so teardown can still
+drive the app after the body timed out.
+
+A test that blocks its worker's event loop (`while (true) {}` in a fixture,
+`beforeEach`, the body, or `afterEach`) stops every timer in that worker, so
+the worker cannot time it out. A `beforeAll` or `afterAll` that blocks still
+hangs the run. When the worker has not responded `cleanupTimeout` (at least 5 s) after
+the test timeout, the runner kills it. That attempt is reported `timed-out`
+with `TEST_TIMEOUT` and no artifacts, after the attempts before it, and is
+not retried. The rest of its file runs on a new worker. In a serial group,
+the members after it are skipped. A worker with a debugger attached when the
+test starts (an editor's auto-attach, or `NODE_OPTIONS=--inspect=0`) is
+never killed this way, so a breakpoint can stay paused. A programmatic run with an inline
+config or in-memory tests runs in the runner's own process and has no worker
+to kill: a blocked event loop hangs it.
+
+A throw inside `beforeAll` or `afterAll` is `HOOK_FAILED` and skips the
+suite's tests with cause `hook-failed`. Inside a serial group it skips every
+remaining member and fails the group without a retry.
+
+## Options
+
+```ts
+export interface TestOptions {
+  /** Attempt deadline in milliseconds; defaults to `config.timeout`. Innermost wins. */
+  timeout?: number;
+  /** Retries, 0 through 10; defaults to `config.retries`. Inside a serial group the group's value applies. */
+  retries?: number;
+  /** Tags for `--tag`: distinct names, none blank, with no comma and no leading or trailing whitespace; every layer's tags are unioned. */
+  tags?: readonly string[];
+  /** Skips the test; a string is the reason. Any truthy layer skips. */
+  skip?: boolean | string;
+  /** Focuses the test locally. CI rejects it with `ONLY_IN_CI`. */
+  only?: boolean;
+  /** Platforms the test runs on; other targets skip it. Innermost wins. */
+  platforms?: readonly string[];
+  /** Capabilities the target must have; otherwise the test is skipped at selection. Innermost wins. */
+  requires?: readonly Capability[];
+  /** Session a setup test saved, restored before the body runs. */
+  session?: string;
+  /** Extra context for agent steps; layers are concatenated outermost first. */
+  agentContext?: string;
+  /**
+   * The configured agent (`agents.<name>`) this test or group runs with, in
+   * place of the run's agents. A list runs the test once per agent named, as
+   * one result each. Innermost wins; a call's own `agent` option wins over
+   * it. `--agent` narrows a list to the names both name and never overrides
+   * a pin the flag does not name.
+   */
+  agent?: string | readonly string[];
+  /**
+   * Which of the test's attempts record a trace, in place of the run's: the
+   * same modes as the config's `trace`. Innermost wins, over `--trace` too;
+   * inside a serial group the group's value applies, since the group
+   * records as one unit. A mode set here is required of the target's engine.
+   */
+  trace?: RecordingMode;
+  /**
+   * Which of the test's attempts record a video, in place of the run's:
+   * the same modes as the config's `video`. Innermost wins, over `--video`
+   * too; inside a serial group the group's value applies, since the group
+   * records as one unit. A mode set here is required of the target's engine.
+   */
+  video?: RecordingMode;
+}
+
+export interface DescribeOptions extends Omit<TestOptions, 'only'> {
+  /** Runs the group as one ordered retry unit with shared app state. Nesting one serial group in another is a `COLLECTION_ERROR`. */
+  serial?: boolean;
+}
+
+export interface SetupOptions extends Omit<TestOptions, 'session' | 'only' | 'skip' | 'agent'> {
+  /** Session names this setup test MUST save. */
+  sessions: readonly string[];
+  /** A setup test runs once per target, so it pins at most one agent. */
+  agent?: string;
+}
+```
+
+`timeout` must be a positive safe integer; `retries` must be an integer from
+0 through 10. Groups do not accept `only`. An option key the call does not
+take (`{ timout: 1000 }`) is `COLLECTION_ERROR`, naming the nearest known key
+when it is a likely typo and every key the call takes otherwise. `test.setup` requires `sessions`
+to be a static, non-empty array of unique names.
+
+Resolution order: test, nearest group, outer groups, config, built-in default.
+
+`requires` names capabilities of the target's engine, the harness ones
+(`observation`, `actions`, `location`, `pointer`, `keyboard`, `state`,
+`artifacts`) and one per contributed fixture (`browser`, `device`; see
+[the engine contract](/reference/engine#engine)), or the kind of app the
+target declares: `browser` for an `app.url`, `native-app` for an
+`app.bundleId` or `app.appPath`. A target that lacks one skips the test at
+selection:
+
+```ts
+test('onboarding asks for the camera', { requires: ['native-app'] }, async ({ app, agent }) => {
+  await app.open();
+  await agent.assert('The app asks for camera access');
+});
+```
+
+An `agent` name that `agents` does not define is a `COLLECTION_ERROR` at
+selection, before any test runs.
+
+`trace` and `video` take a [recording mode](/reference/config#recording):
+`off`, `on`, `retain-on-failure`, `on-first-retry`, or `on-all-retries`. A
+test's or group's own value wins over `--trace` / `--video`, the target's,
+and the config's, so one test can record on a run that records nothing, or
+opt out of one that records everything. A mode set here is required: when it
+records on some attempt and the target's engine cannot record that kind, the
+run fails with `UNSUPPORTED_ARTIFACT` before any test starts, naming the
+test:
+
+```ts
+test('checkout', { video: 'on' }, async ({ agent }) => {
+  await agent.act('Buy the first product in the catalog');
+});
+```
+
+`serial: true` makes the group one ordered retry unit with shared app state
+and shared secret state: a secret fill withholds pixels for the rest of the
+group's attempt. A retry starts fresh. Inside it, `retries`, `trace`,
+`video`, `session`, `platforms`, `requires`, `skip`, `only`, and a nested
+`serial` on a member are collection errors. Set them on the group. The group
+records one trace and one video per group attempt, from the `trace` and
+`video` on the serial `describe` or a group around it. A group attempt that
+cannot start, because its file fails to load or its session fails to launch,
+fails the first member with that error and skips the rest with cause
+`serial-predecessor-failed`. When the run is interrupted during the launch,
+every member skips instead. On a retry, the members keep the verdicts of
+the attempt before it. The exit code follows the error's category, as for any
+other test.
+
+## Fixtures
+
+```ts
+export interface TestFixtures {
+  /** Agent steps. Acquiring the built-in agent without a configured model is `MODEL_UNAVAILABLE`. */
+  readonly agent: Agent;
+  /** App lifecycle: open, restart, clear state, back, screenshot. */
+  readonly app: App;
+  /** Semantic queries and the actions on their matches. */
+  readonly screen: Screen;
+  /** The target's platform label: `web`, `ios`, `android`, or an engine's own string. */
+  readonly platform: string;
+}
+
+export interface SetupFixtures extends TestFixtures {
+  /** Saves the sessions the setup test declared. */
+  readonly session: SetupSession;
+}
+
+export interface SuiteFixtures {
+  /** The target's platform label: `web`, `ios`, `android`, or an engine's own string. */
+  readonly platform: string;
+}
+```
+
+Everything else is a fixture the target's engine contributes, or one of
+[your own](#your-own-fixtures). `@e2e-dev/web` contributes
+[`browser`](/reference/web) and exports a `test` typed with it; a device
+engine contributes `device`. Reaching for a fixture the engine does not
+contribute fails with `UNSUPPORTED_CAPABILITY`; declare `requires: ['browser']`
+to skip such tests at selection instead.
+
+The fixtures above are lazy. Destructuring in the parameter list acquires
+them before the body's first statement. Your own fixtures are not: every
+fixture in the `extend` chain a test was registered through sets up for that
+test, even when its parameters omit it.
+
+### Your own fixtures
+
+`test.extend(fixtures)` defines resources set up before each test and cleaned
+up afterward, including after a failure. In each fixture function, code before
+`await use(value)` sets up the resource. The test receives `value`, and code
+after `use` tears it down.
+
+```ts
+import { test as base } from '@e2e-dev/web';
+
+export const test = base.extend<{ workspace: Workspace }>({
+  workspace: async ({ browser }, use) => {
+    const workspace = await createWorkspace();
+    await signIn(browser, workspace);
+    await use(workspace); // the hooks and the body run here
+    await workspace.cleanup(); // teardown, after the body even when it failed
+  },
+});
+
+test('renames the workspace', async ({ workspace, screen }) => {
+  await screen.getByLabel('Name').fill(`${workspace.name} (renamed)`);
+});
+```
+
+```ts
+/**
+ * Defines one fixture: everything before `await use(value)` is its setup,
+ * everything after is its teardown. The body, its hooks, and later fixtures
+ * run while `use` is pending; it resolves once they are done, whether or not
+ * the body failed.
+ */
+export type FixtureFn<Fixtures, Value> = (
+  fixtures: Fixtures,
+  use: (value: Value) => Promise<void>,
+) => Promise<void>;
+
+/**
+ * One definition per fixture `test.extend()` adds. A definition sees the
+ * fixtures of the `test` it extends, not its siblings: a fixture that needs
+ * another one goes in a chained `extend()`. A name the base already has is a
+ * type error (and a `COLLECTION_ERROR` at runtime).
+ */
+export type FixtureDefinitions<Base, Extra> = {
+  readonly [K in keyof Extra]: K extends keyof Base ? never : FixtureFn<Base, Extra[K]>;
+};
+```
+
+`extend` returns a new `test`; the one it was called on is unchanged. A
+definition is typed against the fixtures of the `test` it extends, not its
+siblings in the same call. A fixture that needs another goes in a chained
+second `extend`: `base.extend({ a }).extend({ b })` gives `b` a fixture
+object that already has `a`.
+
+Per attempt:
+
+1. Each definition runs in declaration order until it calls `use`, whether
+   or not the test names it: a fixture that opens a page or changes app
+   state does so for every test of that `test`, so a file whose tests need
+   different setups registers them through different `extend` chains. Setup
+   counts against the test `timeout`; a failure is reported in phase
+   `beforeEach`, before any `beforeEach` hook has run.
+2. `beforeEach` hooks, the body, then `afterEach` hooks run with the same
+   fixture object. The fixture set is the test's own chain: a hook that reads
+   `workspace` around a test registered through `base` fails with
+   `UNSUPPORTED_CAPABILITY`.
+3. Teardowns run in reverse order after the last `afterEach`, whether or not
+   the body passed, each with its own `cleanupTimeout` budget. An error there
+   fails a passing attempt in phase `afterEach` and joins `secondaryErrors`
+   after a body failure.
+
+What fails, and where:
+
+| Mistake | Fails |
+| --- | --- |
+| A value that is not a plain object of functions, an empty name, a core name (`agent`, `app`, `screen`, `platform`, `session`), or a name an earlier `extend` in the chain defined | At import, `COLLECTION_ERROR` naming the fixture |
+| A name the target's engine contributes (`browser` on a Playwright target) | The attempt, in `beforeEach`, `TEST_SETUP_FAILED` |
+| A definition that returns without calling `use` | The attempt, in `beforeEach`, `TEST_SETUP_FAILED` |
+| A definition that calls `use` twice | The attempt, at teardown, `TEST_SETUP_FAILED` |
+| A definition that throws before `use` | The attempt, in `beforeEach`, with that error |
+| A definition that throws after `use` | The attempt, in `afterEach`, with that error |
+
+A body or hook that hits the test `timeout` is abandoned, not cancelled, so
+teardown starts while it may still be running. A setup abandoned this way
+that reaches `use` later gets an immediate resolve, and its teardown runs
+detached from the run, so what it allocated is still released.
+
+## Function types
+
+```ts
+/** A test body. */
+export type TestFn<Fixtures = TestFixtures> = (fixtures: Fixtures) => void | Promise<void>;
+
+/** A setup test body; `session.save` is the extra fixture. */
+export type SetupFn<Fixtures = TestFixtures> = (
+  fixtures: Fixtures & SetupFixtures,
+) => void | Promise<void>;
+
+/** A `beforeEach` or `afterEach` body. */
+export type TestHookFn<Fixtures = TestFixtures> = (fixtures: Fixtures) => void | Promise<void>;
+
+/** A `beforeAll` or `afterAll` body. */
+export type SuiteHookFn = (fixtures: SuiteFixtures) => void | Promise<void>;
+
+/** A `describe` body. An async body is a type error. */
+export type SynchronousBody<Result> = Extract<Result, PromiseLike<unknown>> extends never
+  ? () => Result
+  : never;
+
+/** Opaque handle of a registered test. */
+export interface TestCase {
+  readonly [testCaseBrand]: true;
+}
+```

@@ -1,0 +1,175 @@
+---
+title: Exploring without a test
+description: Give the agent a goal instead of a test file. It plans its own steps, drives the app, and reports what it finds.
+icon: "compass"
+---
+
+Use `e2e explore` to investigate a flow without writing a test. Give the
+agent a goal; it chooses the steps and records findings in
+`.e2e/report.json`.
+
+<CodeGroup>
+```bash npm
+npx e2e explore 'Explore the checkout flow like a first-time buyer and report anything off'
+```
+
+```bash pnpm
+pnpm exec e2e explore 'Explore the checkout flow like a first-time buyer and report anything off'
+```
+
+```bash bun
+bunx e2e explore 'Explore the checkout flow like a first-time buyer and report anything off'
+```
+</CodeGroup>
+
+Explore can help you investigate a feature or choose flows to turn into
+regression tests. It uses the same model, tools, and action rules as
+`agent.act()`. Review the findings against their evidence.
+
+## What a run does
+
+The runner opens the target app, plans one step, and carries it out with
+`agent.act`. The agent records findings as it goes, including what it
+expected, what it saw, and how to reproduce it. A screenshot is attached
+when capture is allowed and succeeds.
+
+The process repeats until the planner considers the goal covered or a
+budget expires, then produces a closing assessment. A failed step does not
+stop exploration. Three consecutive failed or blocked steps with no new
+findings end the run.
+
+## Budgets
+
+| Budget | Default | Range | Flag |
+| --- | --- | --- | --- |
+| Exploration steps | 8 | 1 to 12 | `--max-steps <n>` |
+| Wall clock | 10 minutes | 3 to 15 minutes | `--timeout <ms>` |
+| Actions and model calls per step | 40 each, unless the agent sets `maxSteps` or `maxModelCalls` | 1 to 100 | config |
+
+Start with the defaults. Increase the step or time budget when the report
+shows that the run stopped before reaching the part of the flow you need.
+
+## The verdict
+
+| Outcome | Run status | Exit code |
+| --- | --- | --- |
+| Steps ran, no `issue` finding, and not every step was blocked | passed | 0 |
+| At least one `issue` finding | failed | 1 |
+| No step ran and nothing was found | blocked | 1 |
+| Every step was blocked, with no `issue` finding | blocked | 1, 2, or 3, from the first blocker |
+| Config, engine, or model provider error | error | 2 or 3 |
+
+An `issue` is a functional defect and fails the run. A `warning` is cosmetic
+and does not. If every step was blocked, the run stays blocked and reports
+the first blocker's error. A step that reaches its action or time budget
+is recorded as time-boxed; findings still determine the verdict.
+
+## What you get
+
+The terminal follows the exploration as it happens: each finding the moment
+the agent reports it, and each step as it finishes, by title.
+
+```text
+ ❯  web  Exploring  Explore this bookshop like a careful first-time buyer: browse the catalog, ...
+   ⚑ medium issue  Home greeting exposes an unresolved userName template (/)
+   ⚑ high issue  Neuromancer shows an impossible negative stock availability (/catalog)
+   ✓ 1  Catalog browsing 31.46s · 7 actions · 4 findings
+   ⚑ high issue  Cart total does not update when Hyperion quantity increases (/cart)
+   ⚑ trivial warning  Checkout newsletter label misspells Receive (/checkout)
+   ✓ 2  Cart quantities and removal 19.47s · 4 actions · 3 findings
+   ended: the agent covered the goal
+```
+
+The final report lists issues before warnings, with the most severe first.
+Each finding includes its location, expected and observed behavior,
+reproduction steps, and any screenshot evidence. Severity runs from
+`trivial` at 1 to `critical` at 5.
+
+The JSON report stores these details under `run.explore`, along with the
+goal, budgets, steps, assessment, and reason the run ended. Findings carry no
+screenshots once a secret is filled; see
+[screenshots after a secret fill](/security#screenshots-after-a-secret-fill).
+
+Its artifacts land in a directory named after the goal, such as
+`.e2e/artifacts/web/explore-check-the-cart-totals-1a2b3c4d5e6f7a8b/`. A rerun
+of the same goal writes to the same directory.
+
+`--reporter list,markdown` also writes the findings to `.e2e/summary.md`.
+`--debug`, `--ai-trace`, `--trace`, and `--video` work as they do for
+`e2e run`: they apply when the engine can record, with a notice otherwise.
+The exploration is one attempt, so a retry mode (`on-first-retry`,
+`on-all-retries`, and the CI trace default) records nothing, and the run
+prints a notice saying to pass `--trace on` (or `--video on`); put the goal
+before a bare `--trace` or `--video`.
+
+## Your config applies
+
+Explore reads `e2e.config.ts`, including the target, app command, model, and
+agent context. It starts the target's app command. Use `--agent <name>` to select a configured agent.
+The agent's `tools` and `system` instructions also apply. Custom executors
+are replaced by the built-in agent for exploration, with a notice naming the
+agent. The built-in agent needs a model: an entry with none, a custom
+executor that brought none included, fails with `MODEL_UNAVAILABLE` before
+anything starts.
+
+Every configured credential is available to the explorer. It receives
+account names and usernames; passwords remain secret handles and require
+an engine that supports sensitive fills. Configure only the accounts needed
+for the exploration. Without credentials, it skips password sign-in.
+
+Use `--target <name>` to choose among several targets. Otherwise, explore
+uses the first and prints a notice. Exploration disables the replay cache
+and retries.
+
+## Start signed in
+
+Pass `--session <name>` to explore as a signed-in user. The name is a session
+a [setup test](/authentication) in your test files saves:
+
+<CodeGroup>
+```bash npm
+npx e2e explore --session admin 'Explore the admin settings and find bugs'
+```
+
+```bash pnpm
+pnpm exec e2e explore --session admin 'Explore the admin settings and find bugs'
+```
+
+```bash bun
+bunx e2e explore --session admin 'Explore the admin settings and find bugs'
+```
+</CodeGroup>
+
+Explore runs the one setup test that declares the session, restores the
+session, and opens the app when the target declares a URL, as for a test
+that declares `{ session: 'admin' }`. No other test runs. The setup test
+runs as it does for `e2e run`, with your configured agents, replay cache,
+and retries. The explorer is told the app starts signed in, so it does not
+plan a sign-in step.
+
+If no setup test declares the name, the run stops with `COLLECTION_ERROR`
+before any app process starts. The message lists the sessions your setup
+tests declare.
+
+A setup that fills a password leaves the exploration without screenshots. To
+keep them, sign in without filling a secret; see
+[screenshots after a secret fill](/security#screenshots-after-a-secret-fill).
+
+## Writing a good goal
+
+Name the flow and the user's goal, for example, "Explore checkout as a
+first-time buyer and check that totals match the cart." Include boundaries
+when needed, such as "stop before placing the order." Without a goal,
+explore uses `Explore the app and find bugs`.
+
+To cover a whole app or branch, run several explorations at once and verify
+what they find: see [Bug bashes](/bug-bash).
+
+<CardGroup cols={2}>
+  <Card title="CLI reference" icon="terminal" href="/reference/cli#e2e-explore">
+    Every flag of `e2e explore`.
+  </Card>
+  <Card title="Agents and personas" icon="users" href="/agents">
+    The agents explore can run as.
+  </Card>
+</CardGroup>

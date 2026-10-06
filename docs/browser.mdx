@@ -1,0 +1,477 @@
+---
+title: Working with the browser
+description: Mock an API, handle a dialog, download a file, reach into an iframe, and pick a browser.
+icon: "window-maximize"
+---
+
+`@e2e-dev/web` runs tests in Chromium, Firefox, and WebKit. It is built on
+[Playwright](https://github.com/microsoft/playwright).
+
+Use `screen`, `app`, and `expect` for navigation, interactions, and checks.
+For browser-specific operations such as request mocking, dialogs, and
+downloads, use `browser`. Import `test` from `@e2e-dev/web` to access it:
+
+```ts
+import { test } from '@e2e-dev/web';
+import { expect } from 'e2e';
+
+test('the dashboard loads', async ({ app, screen, browser }) => {
+  await app.open('/dashboard');
+  await expect(browser).toHaveURL('/dashboard');
+  await expect(browser).toHaveTitle(/Dashboard/);
+  await expect(screen.getByRole('heading', 'Overview')).toBeVisible();
+});
+```
+
+In a suite with device targets, add `{ requires: ['browser'] }` to tests that
+use `browser` so the runner skips them on devices.
+
+## Mock an API
+
+`browser.route` intercepts requests for the attempt. Register it before the page
+opens; it stays in force across `app.restart()` and a session restore.
+
+```ts
+await browser.route('**/api/quote', async (route) => {
+  await route.fulfill({ json: { cents: 4200 } });
+});
+
+await app.open('/checkout');
+await expect(screen.getByText('$42.00')).toBeVisible();
+```
+
+Each handler must call exactly one of `fulfill`, `continue`, `fallback`, or
+`abort`. The newest route runs first; `continue` sends the request straight to
+the network, while `fallback` passes it to the route registered before. An
+`expect` that fails inside the handler fails the test, at the next step or at
+the end of the test when nothing follows. To inspect a real response, start
+waiting before the action that sends it:
+
+```ts
+const [response] = await Promise.all([
+  browser.waitForResponse('**/api/orders'),
+  screen.getByRole('button', 'Place order').tap(),
+]);
+expect(response.status).toBe(201);
+```
+
+## Handle a dialog
+
+An unhandled `alert`, `confirm`, or `prompt` fails the next step. Register a
+handler first:
+
+```ts
+const off = await browser.onDialog('accept');
+await screen.getByRole('button', 'Delete').tap();
+await off();
+```
+
+A function handler gets the dialog and must call `accept(text?)` or
+`dismiss()`.
+
+## Download a file
+
+```ts
+const file = await browser.waitForDownload(() =>
+  screen.getByRole('link', 'Export CSV').tap(),
+);
+```
+
+The download is registered as a `download` artifact. `file.path` is relative to
+the attempt's artifact directory, not an absolute or project-relative file
+path.
+
+## Reach into an iframe
+
+`browser.frameLocator` scopes queries to a frame:
+
+```ts
+const payment = browser.frameLocator('#payment-frame');
+await payment.getByLabel('Card number').fill('4242424242424242');
+```
+
+Use role and label queries when possible. Within a frame, `locator` accepts
+CSS or XPath selectors and `frameLocator` enters a nested frame:
+
+```ts
+const editor = browser.frameLocator('#result');
+await editor.locator('#upload').setInputFiles('fixtures/photo.png');
+await expect(editor.frameLocator('#preview').getByRole('heading', 'Uploaded')).toBeVisible();
+```
+
+`browser.locator('css or xpath')` does the same on the page itself. Use it only
+when role, label, and test-id queries cannot identify an element. If a hidden
+duplicate causes an ambiguous match, try `{ visible: true }` on the query
+first.
+
+## Read from the page
+
+`browser.evaluate` runs a function in the page. It is serialized, so it cannot
+close over test variables; pass data as the second argument.
+
+```ts
+const count = await browser.evaluate(() => document.querySelectorAll('li').length);
+const flag = await browser.evaluate((name: string) => window.localStorage.getItem(name), 'featureFlags');
+```
+
+Use `evaluate` for state that `screen` cannot read. Prefer locators and
+assertions for visible UI so tests depend less on the DOM structure.
+
+## Run a script before the page
+
+An init script runs in every document before the page's own scripts: mock a
+browser API, seed `Math.random`, or set a flag the app reads at boot. For every
+test:
+
+```ts
+web({ initScripts: [{ path: 'tests/init.js' }] })
+```
+
+For one test, before the page opens:
+
+```ts
+await browser.addInitScript((value) => { Math.random = () => value; }, 0.5);
+await app.open('/raffle');
+```
+
+See [init scripts](/reference/web#init-scripts).
+
+## Cookies
+
+```ts
+await browser.setCookies([{ url: 'http://localhost:3000', name: 'tz', value: 'UTC' }]);
+```
+
+A cookie URL that does not parse, or uses a scheme other than `http:` or
+`https:` (`about:blank` included), is `POLICY_DENIED`; a domain cookie is checked as the origin
+it would be sent to. If any entry is refused, no cookies are set. To resize
+the page, see [Viewports](/web#viewports).
+
+## Pick a browser
+
+The browser and the initial viewport are options of the engine; the app is
+the target's. Two browsers on one app are two targets:
+
+```ts title="e2e.config.ts"
+import type { E2EConfig } from 'e2e';
+import { web } from '@e2e-dev/web';
+
+const app = { url: 'http://localhost:3000' };
+
+export default {
+  targets: [
+    { name: 'chromium', engine: web(), app },
+    { name: 'webkit-mobile', engine: web({ browser: 'webkit', viewport: { width: 390, height: 844 } }), app },
+  ],
+} satisfies E2EConfig;
+```
+
+In CI, provision the extra browser with the [install command](/reference/web#installing-browsers):
+
+<CodeGroup>
+```bash npm
+npx @e2e-dev/web install webkit --with-deps
+```
+
+```bash pnpm
+pnpm exec e2e-web install webkit --with-deps
+```
+
+```bash bun
+bunx @e2e-dev/web install webkit --with-deps
+```
+</CodeGroup>
+
+`connect` attaches to a remote Chromium over CDP instead of launching
+one; a [browser provider](#hosted-browsers) does the same and also leases
+and releases the browser. [Viewports](/web#viewports) covers sizes.
+
+## Hosted browsers
+
+`browser` can also be a `BrowserProvider`: an object that leases a browser
+from a service and hands back the CDP endpoint to attach to. The engine
+attaches over CDP the way `connect` does, and adds the lifecycle `connect`
+lacks: it asks for a browser when one is needed and gives it back when its
+scope ends, on every exit path, so a session billed by the minute stops
+when the run no longer uses it. The engine knows no vendor: for
+[Kernel](/integrations/kernel), `kernel()` from `@e2e-dev/kernel` is the
+provider, and for any other service a provider is a few dozen lines in your
+project. Add `viewport: null` when
+the service shows the window in a live view: the page then
+[fills the window](/web#fill-the-window) instead of a fixed 1280 by
+720 area of it.
+
+```ts
+export interface BrowserProvider {
+  /** Label in progress lines and error messages. */
+  readonly name: string;
+  /** `worker` (default): one browser per worker slot for the run. `attempt`: a fresh browser per attempt. */
+  readonly scope?: 'worker' | 'attempt';
+  acquire(request: BrowserRequest): Promise<BrowserLease>;
+  release(lease: BrowserLease, context: BrowserReleaseContext): Promise<void>;
+  /** Optional: the service's own recording of the browser, in the worker, for an attempt that records video. */
+  record?(lease: BrowserLease, context: ProviderRecordContext): Promise<ProviderRecording>;
+  /** Optional: serves `browser.waitForDownload` for a browser on another machine. */
+  readonly downloads?: BrowserProviderDownloads;
+  /** Optional: releases the run's leases a dead worker left open, once the run ends; resolves to their ids. */
+  sweep?(context: BrowserReleaseContext): Promise<readonly string[]>;
+}
+
+export interface BrowserProviderDownloads {
+  /** Absolute directory on the browser's machine the browser saves downloads to. */
+  readonly dir: string;
+  /** The bytes of one finished download, `file` a path under `dir`, read off the leased browser. */
+  read(lease: BrowserLease, file: string, context: BrowserDownloadContext): Promise<Uint8Array>;
+}
+
+export interface BrowserLease {
+  /** The provider's handle (a session id), handed back to `release`. */
+  readonly id: string;
+  /** `ws://`, `wss://`, or `http://` DevTools endpoint to attach to over CDP. */
+  readonly cdpEndpoint: string;
+  /** Endpoint to reattach to the same browser after a transport drop; per-attempt leases only. */
+  readonly reconnectEndpoint?: string;
+}
+```
+
+`acquire` receives the run id, target, worker slot and slot count, the
+attempt id for a per-attempt lease, the run's environment, an abort signal,
+and a `log` that reaches the reporter. Read tokens from `request.env`, not
+`process.env`. A lease is JSON data: only `id`, `cdpEndpoint`, and
+`reconnectEndpoint` travel to the worker, and `release` gets back the object
+`acquire` returned, so a provider can keep its own fields on it. A target
+with nothing to run leases nothing. A provider implies chromium (CDP attach
+is chromium-only) and cannot be combined with `connect`.
+
+`scope: 'worker'`, the default, leases one browser per worker slot when the
+run starts, all slots in parallel, and each worker attaches to its own for
+every attempt it runs. Every lease granted is held by the engine: a slot
+that fails to lease ends the run before any test, and the leases that
+succeeded are still released. Release happens after the last worker exits,
+on every exit path including failure, interrupt, and a `prepare` that
+threw, within `cleanupTimeout`. When a worker's browser drops, the worker
+leases a replacement itself at the next attempt start and releases it when
+the worker exits; the dead lease stays with the runner, which releases it
+at the end. `acquire` therefore runs in a worker process too, so a provider
+must not depend on state it built in the runner process; its `log` still
+reaches the reporter, prefixed with the target and worker slot. Each lease
+is released exactly once, by the side that acquired it.
+
+A worker that dies (a crash, `process.exit`, a kill) cannot release what it
+acquired: an attempt's browser, or a replacement. Implement `sweep` to have
+the runner release those too. It runs once per target when the run ends,
+after the last worker exited and the leases the runner holds were released,
+so every lease it finds with the run's id and the target at the service is
+one a worker left open; it releases them and resolves to their ids, which
+the reporter lists. A sweep that fails is reported as a line and fails
+nothing. Without `sweep`, such a browser lives until the service ends it.
+
+`scope: 'attempt'` leases a fresh browser in every `startAttempt`, retries
+included, and releases it in `endAttempt`, also after a start that failed.
+A lease that arrives once the attempt was cancelled or ended is given
+straight back, never used.
+The attempt runs in the browser's persistent default context, on the
+browser's own first tab, so the remote must contain only that context, and
+the limits of
+[`connect.reconnectEndpoint`](/reference/web#recovering-a-cdp-transport)
+apply: no `headers`, `basicAuth`, `userAgent`, `locale`, or `timezoneId` (each is `INVALID_CONFIG`), no
+`app.clearState()` (`UNSUPPORTED_CAPABILITY` naming the scope), and no session
+state capture or restore, so a run whose tests consume a
+[session](/authentication) on the target fails with `COLLECTION_ERROR`
+before its setup test logs in. After a transport
+drop the next operation reattaches through the lease's `reconnectEndpoint`,
+or `cdpEndpoint` when the lease has none, and the engine checks it is the
+same browser.
+
+A provider against a typical session API has three requests: create a
+session, poll it until it exposes a DevTools endpoint, stop it.
+
+```ts title="browser-provider.ts" expandable
+import type { BrowserProvider } from '@e2e-dev/web';
+
+/**
+ * Leases browsers from a service that starts a Chromium per session and
+ * exposes its DevTools endpoint. Replace the three requests with your
+ * service's API.
+ */
+export function hostedBrowsers(options: { serviceUrl: string; scope?: 'worker' | 'attempt' }): BrowserProvider {
+  return {
+    name: 'hosted-browsers',
+    scope: options.scope ?? 'worker',
+    async acquire(request) {
+      const token = request.env['BROWSER_SERVICE_TOKEN'];
+      if (token === undefined || token === '') throw new Error('BROWSER_SERVICE_TOKEN is not set');
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+      // 1. Ask for a browser; name the session after the run so it can be found later.
+      const created = await fetch(`${options.serviceUrl}/sessions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `e2e ${request.runId} ${request.targetName} ${request.attemptId ?? `slot ${request.slot + 1} of ${request.slots}`}`,
+        }),
+        signal: request.signal,
+      });
+      if (!created.ok) throw new Error(`browser service: HTTP ${created.status}`);
+      const { id } = (await created.json()) as { id: string };
+      // 2. Wait until the session exposes its DevTools endpoint.
+      for (;;) {
+        const response = await fetch(`${options.serviceUrl}/sessions/${id}`, { headers, signal: request.signal });
+        const session = (await response.json()) as { status: string; cdpUrl?: string; viewerUrl?: string };
+        if (session.status === 'ready' && session.cdpUrl !== undefined) {
+          if (session.viewerUrl !== undefined) request.log(`watch at ${session.viewerUrl}`);
+          return { id, cdpEndpoint: session.cdpUrl };
+        }
+        if (session.status !== 'starting') throw new Error(`browser service: session ${id} is ${session.status}`);
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+    },
+    async release(lease, context) {
+      // 3. Stop the session; the run waits for this within cleanupTimeout.
+      const token = context.env['BROWSER_SERVICE_TOKEN'] ?? '';
+      await fetch(`${options.serviceUrl}/sessions/${lease.id}/stop`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        signal: context.signal,
+      });
+    },
+  };
+}
+```
+
+```ts title="e2e.config.ts"
+import type { E2EConfig } from 'e2e';
+import { web } from '@e2e-dev/web';
+import { hostedBrowsers } from './browser-provider.ts';
+
+export default {
+  targets: [
+    {
+      name: 'hosted',
+      engine: web({
+        browser: hostedBrowsers({ serviceUrl: 'https://browsers.example.com' }),
+      }),
+      app: { url: 'https://staging.example.com' },
+    },
+  ],
+  workers: 2,
+} satisfies E2EConfig;
+```
+
+Two workers lease two sessions in parallel and keep them for the run. Hosted
+sessions are billed while they run, so keep `workers` at what the suite can
+fill; `scope: 'attempt'` trades a session start per test for a browser no
+earlier test has touched.
+
+### Downloads on the provider
+
+A hosted browser saves a download to its own disk, where the runner cannot
+open it. Implement `downloads` and `browser.waitForDownload` works as it does
+locally: the engine has the browser save the file under `dir` on its machine
+and hands the finished file's path to `read`, which fetches the bytes through
+the service's file API, in the worker, bounded by the call's timeout. The
+engine saves them as the attempt's `download` artifact. Without `downloads`, a
+download on a browser that runs on another machine fails with `ENGINE_FAILURE`
+naming the provider; one whose browsers run on the runner's machine needs
+nothing. [Kernel](/integrations/kernel#downloads) serves downloads this way.
+
+### Recording on the provider
+
+A service that records its browsers can record the attempt's video too.
+Implement `record` and an attempt that records [video](/reference/config#video)
+calls it from the worker, with the lease that attempt rides, instead of
+starting the engine's screencast of the page. It starts once the attempt's
+page is open and covers the whole browser window, tabs and address bar
+included. `record` returns a `ProviderRecording` (import the type from
+`e2e/engine`), stopped when the attempt collects its video: `stop` either
+writes a file into the directory it is given and returns `{ file }`, kept as
+`video/<file>` beside the attempt's other artifacts, or returns
+`{ url, mediaType }` for a recording the service keeps, which the report
+links to.
+
+```ts title="browser-provider.ts"
+import type { ProviderRecording } from 'e2e/engine';
+
+// In hostedBrowsers(), beside acquire and release.
+async record(lease, context): Promise<ProviderRecording> {
+  const headers = { Authorization: `Bearer ${context.env['BROWSER_SERVICE_TOKEN'] ?? ''}` };
+  const startedAt = new Date().toISOString();
+  const started = await fetch(`${options.serviceUrl}/sessions/${lease.id}/recordings`, {
+    method: 'POST',
+    headers,
+    signal: context.signal,
+  });
+  if (!started.ok) throw new Error(`browser service: HTTP ${started.status}`);
+  const { id } = (await started.json()) as { id: string };
+  return {
+    startedAt,
+    async stop({ signal }) {
+      const stopped = await fetch(`${options.serviceUrl}/recordings/${id}/stop`, { method: 'POST', headers, signal });
+      if (!stopped.ok) throw new Error(`browser service: HTTP ${stopped.status}`);
+      // The service keeps the recording; the report links to its player page.
+      return { url: `${options.serviceUrl}/recordings/${id}`, mediaType: 'text/html' };
+    },
+  };
+},
+```
+
+In `worker` scope the lease `record` gets is usually the copy that traveled
+to the worker, which carries only `id`, `cdpEndpoint`, and
+`reconnectEndpoint`, so key the recording on `lease.id`.
+
+A `record` that fails fails the attempt's launch, named after the provider
+and the lease; a `stop` that fails is tried once more when the attempt ends,
+so a recording never keeps running on a browser later attempts share. A
+provider that cannot record, or a browser the service cannot record (a
+headless one), leaves `record` out, and the engine records the screencast.
+[Kernel](/integrations/kernel#recordings) records this way.
+
+## Icon fonts and generated content
+
+Text a stylesheet adds with `::before` or `::after` is part of a control's
+name, as browsers and screen readers read it: a button whose icon is
+`.next::before { content: "→" }` is `button "→ Next"` in the tree and to
+`getByRole`. Icon fonts are the exception. Font Awesome and its kin draw
+each icon from a private-use character (`\f090`) that means nothing as text,
+so the engine drops those characters from every name: the-internet's
+`<button><i class="fa fa-sign-in"> Login</i></button>` is `button "Login"`,
+and `getByRole('button', 'Login')` finds it; a glyph between two
+words reads as a space. A control whose only content is such an icon reads
+as its `title` when it has one, but the browser names it by the glyph, so
+`getByRole` by that title finds nothing: give it an `aria-label`, or reach
+it with `browser.locator('[title="Sign out"]')`. A `RegExp` name is matched against the
+name as the browser computes it, glyph included, so leave it unanchored
+(`/Login/`) on such a control. Label text never includes generated content,
+as `getByLabel` reads it.
+
+## Inert content
+
+The agent does not see an element with the `inert` attribute or anything
+under it, so it never aims at a control behind an open drawer. Locators
+still find inert content and `toBeVisible` still passes, as in Playwright.
+
+## Shadow DOM
+
+`screen` queries, scopes, and `has` filters reach into open and closed shadow
+roots, and the agent sees their content. Actions and assertions work there
+as anywhere else. `first`, `last`, and `nth` count matches outside a closed
+root first, then each root's matches in order.
+
+```ts
+// The input and the button live in a closed shadow root a widget attached.
+await screen.getByPlaceholder('Access code').fill('SHADOW-42');
+await screen.getByRole('button', 'Submit').tap();
+await expect(screen.getByText('Access granted')).toBeVisible();
+```
+
+`browser.locator`, `frameLocator`, and `filter({ hasText })` stop at a closed
+root: query the text inside the root instead, or filter with `has`. A closed
+root declared in HTML (`<template shadowrootmode="closed">`) is out of reach.
+
+<CardGroup cols={2}>
+  <Card title="Web engine reference" icon="masks-theater" href="/reference/web">
+    Every `browser` method, its timeout, and what it throws.
+  </Card>
+  <Card title="Web" icon="play" href="/web">
+    Let the runner start the dev server, reach protected previews, and test viewports.
+  </Card>
+</CardGroup>
