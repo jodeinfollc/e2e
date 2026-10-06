@@ -40,13 +40,13 @@
   "devDependencies": {
     "@ai-sdk/typesafe-ai": "3.0.13",
     "@e2e-dev/web": "workspace:*",
-    "@types/node": "26.6.2",
-    "ai": "7.0.128",
+    "@types/node": "26.6.4",
+    "ai": "7.0.127",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "e2e": "workspace:*",
     "typescript": "7.0.2",
-    "vitest": "5.0.1"
+    "vitest": "5.0.3"
   },
   "engines": {
     "node": "^22.22.3 || >=24.8.0"
