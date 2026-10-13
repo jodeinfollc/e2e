@@ -95,7 +95,7 @@
     "@vitest/expect": "5.0.3",
     "commander": "15.0.0",
     "get-tsconfig": "4.14.3",
-    "oxc-parser": "0.152.0",
+    "oxc-parser": "0.153.0",
     "oxc-transform": "0.152.0",
     "picocolors": "1.1.1",
     "pngjs": "7.0.0",
